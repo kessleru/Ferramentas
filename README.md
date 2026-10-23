@@ -104,7 +104,7 @@ Cada ferramenta lista as próprias opções com `--help`, por exemplo `python fe
 
 ## Funciona em qualquer terminal
 
-Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code e terminais do Linux. Ele descobre sozinho quantas cores o terminal aguenta (milhões, 256 ou 16) e quais símbolos a fonte tem. Em tela estreita, o logo encolhe para uma linha e nada passa da borda: testado de 40 a 100 colunas, e no Python 3.8 e no 3.13.
+Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code e terminais do Linux. Ele descobre sozinho quantas cores o terminal aguenta (milhões, 256 ou 16) e quais símbolos a fonte tem. Nos terminais que deixam (Windows Terminal, VS Code, iTerm, WezTerm, kitty…), os caminhos dos relatórios e os endereços dos sites são clicáveis. Em tela estreita, o logo encolhe para uma linha e nada passa da borda: testado de 40 a 100 colunas, e no Python 3.8 e no 3.13.
 
 ## Segurança
 
