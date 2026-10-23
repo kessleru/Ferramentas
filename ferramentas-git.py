@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-# ferramentas-git — utilidades para todos os seus repositórios do GitHub.
+# ferramentas-git — onze ferramentas num arquivo só, em duas partes.
 #
-#   python ferramentas-git.py               abre o menu
-#   python ferramentas-git.py segredos      caça chaves e senhas no histórico
-#   python ferramentas-git.py branches      apaga branches já mescladas
-#   python ferramentas-git.py demos         confere se os sites das demos estão no ar
-#   python ferramentas-git.py backup        baixa/atualiza a branch principal de todos
-#   python ferramentas-git.py deps          vulnerabilidades e dependências velhas
-#   python ferramentas-git.py coautores     tira a coautoria do Claude do histórico
+#   python ferramentas-git.py                abre o menu
 #
-# Depois do comando: nomes de repositórios (só eles), --teste (não altera nada no GitHub),
-# --sim (não pede confirmação), --destino PASTA (backup), --forks (inclui forks),
-# --restaurar ARQUIVO (branches: recria as que foram apagadas numa rodada anterior),
-# --ascii (terminal que mostra quadradinhos no lugar dos símbolos), --sem-cor.
+#   PARTE 1 · seus repositórios no GitHub
+#   python ferramentas-git.py segredos       caça chaves e senhas no histórico
+#   python ferramentas-git.py branches       apaga branches já mescladas
+#   python ferramentas-git.py demos          confere se os sites das demos estão no ar
+#   python ferramentas-git.py backup         baixa/atualiza a branch principal de todos
+#   python ferramentas-git.py deps           vulnerabilidades e dependências velhas
+#   python ferramentas-git.py coautores      tira a coautoria do Claude do histórico
 #
-# Precisa de Python 3.8+, git e curl. O git-filter-repo (só para o coautores) se instala sozinho.
+#   PARTE 2 · seu computador e seus sites
+#   python ferramentas-git.py faxina         libera espaço de projetos parados (node_modules, venv, builds, caches)
+#   python ferramentas-git.py portas         quem está usando cada porta, e encerra quem você escolher
+#   python ferramentas-git.py raiox SITE     acessibilidade, SEO, desempenho, segurança e links de um site
+#   python ferramentas-git.py peso SITE      o que cada página carrega, o que mais pesa e quanto dá para economizar
+#   python ferramentas-git.py atualizar      atualiza sistema, linguagens, pacotes globais e extensões do PC
+#
+# Opções de todas: --teste (só mostra, não altera nada), --sim (não pergunta), --ascii, --sem-cor.
+# Cada ferramenta tem as suas: python ferramentas-git.py backup --help
+#
+# Precisa de Python 3.8+. A parte 1 usa git e curl; o raio-x e o peso usam curl.
+# O git-filter-repo (só para o coautores) se instala sozinho.
 
 import argparse
 import base64
@@ -26,6 +34,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -40,31 +49,7 @@ from urllib.parse import quote, urlparse
 DONO = os.environ.get('FERRAMENTAS_GIT_DONO', 'kessleru')
 CASA = Path(os.environ.get('FERRAMENTAS_GIT_CASA') or Path.home() / '.ferramentas-git')
 
-# Catppuccin Frappé, a paleta do kessleru.com.br
-PALETA = {
-    'texto': (198, 208, 245), 'sub': (165, 173, 206), 'apagado': (131, 139, 167),
-    'superficie': (81, 87, 109), 'fundo': (65, 69, 89),
-    'verde': (166, 209, 137), 'vermelho': (231, 130, 132), 'amarelo': (229, 200, 144),
-    'pessego': (239, 159, 118), 'azul': (140, 170, 238), 'roxo': (202, 158, 230),
-}
-
-# o favicon do portfólio ("</>") e o nome, em meio-blocos: 3 linhas de altura
-LOGO_SIMBOLO = [' ▄▀   █ ▀▄ ', '▀▄  ▄▀   ▄▀', '  ▀ ▀   ▀  ']
-LOGO_NOME = ['█ █ █▀▀ █▀▀ █▀▀ █   █▀▀ █▀▄ █ █',
-             '█▀▄ █▀  ▀▀█ ▀▀█ █   █▀  █▀▄ █ █',
-             '▀ ▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀']
-
-FERRAMENTAS = [
-    ('segredos', 'segredos.sh', 'chaves e senhas vazadas'),
-    ('branches', 'branches.sh', 'apaga as já mescladas'),
-    ('demos', 'demos.sh', 'os sites estão no ar?'),
-    ('backup', 'backup.sh', 'cópia da branch principal'),
-    ('deps', 'deps.sh', 'falhas e versões velhas'),
-    ('coautores', 'coautores.sh', 'tira a coautoria do Claude'),
-]
-
-
-# ═══════════════════════════════ utilidades ═══════════════════════════════
+# ═══════════════════════════════ núcleo: utilidades ═══════════════════════════════
 
 def agora_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -74,11 +59,13 @@ def carimbo():
     return datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
 
-def ha_quanto(iso):
+def ha_quanto_iso(iso):
     try:
         t = datetime.fromisoformat(iso.replace('Z', '+00:00'))
     except (ValueError, AttributeError):
         return ''
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
     s = (datetime.now(timezone.utc) - t).total_seconds()
     if s < 3600:
         return 'agora há pouco'
@@ -94,20 +81,6 @@ def ha_quanto(iso):
 
 def texto(b):
     return b.decode('utf-8', 'replace') if isinstance(b, bytes) else (b or '')
-
-
-def corta(s, n):
-    s = str(s)
-    if n <= 0:
-        return ''
-    return s if len(s) <= n else (s[:n - 1] + '…' if n > 1 else s[:n])
-
-
-ANSI = re.compile(r'\033\[[0-9;]*m')
-
-
-def vlen(s):
-    return len(ANSI.sub('', s))
 
 
 def roda(cmd, cwd=None, entrada=None, env=None, tempo=None):
@@ -131,13 +104,6 @@ def tamanho_pasta(p):
     return total
 
 
-def humano(n):
-    for u in ('B', 'KB', 'MB', 'GB'):
-        if n < 1024 or u == 'GB':
-            return f'{n:.0f} {u}' if u in ('B', 'KB') else f'{n:.1f} {u}'.replace('.', ',')
-        n /= 1024
-
-
 def carrega_estado():
     try:
         return json.loads((CASA / 'estado.json').read_text(encoding='utf-8'))
@@ -150,7 +116,54 @@ def salva_estado(estado):
     (CASA / 'estado.json').write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding='utf-8')
 
 
-# ═══════════════════════════════ terminal ═══════════════════════════════
+# ═══════════════════════════════ núcleo: terminal ═══════════════════════════════
+
+PALETA = {  # Catppuccin Frappé, a paleta do kessleru.com.br
+    'texto': (198, 208, 245), 'sub': (165, 173, 206), 'apagado': (131, 139, 167),
+    'superficie': (81, 87, 109), 'fundo': (65, 69, 89),
+    'verde': (166, 209, 137), 'vermelho': (231, 130, 132), 'amarelo': (229, 200, 144),
+    'pessego': (239, 159, 118), 'azul': (140, 170, 238), 'roxo': (202, 158, 230),
+}
+CORES16 = {'texto': 97, 'sub': 37, 'apagado': 90, 'superficie': 90, 'fundo': 90, 'verde': 92, 'vermelho': 91,
+           'amarelo': 93, 'pessego': 33, 'azul': 94, 'roxo': 95}
+LOGO_SIMBOLO = [' ▄▀   █ ▀▄ ', '▀▄  ▄▀   ▄▀', '  ▀ ▀   ▀  ']
+LOGO_NOME = ['█ █ █▀▀ █▀▀ █▀▀ █   █▀▀ █▀▄ █ █',
+             '█▀▄ █▀  ▀▀█ ▀▀█ █   █▀  █▀▄ █ █',
+             '▀ ▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀']
+TROCA_SIMPLES = str.maketrans({'✓': '+', '✗': 'x', '↳': '>', '↻': '*', '↑': '^', '→': '->', '●': '•', '◆': '♦'})
+TROCA_ASCII = str.maketrans({'✓': '+', '✗': 'x', '·': '.', '…': '...', '─': '-', '●': '*', '◆': '>', '■': '#',
+                             '█': '#', '▀': '"', '▄': '_', '↳': '>', '↑': '^', '↻': '*', '→': '->', '—': '-',
+                             '•': '*', '♦': '>', '↓': 'v', '₂': '2', '🔒': '', '≈': '~', '×': 'x'})
+ANSI = re.compile(r'\033\[[0-9;]*m')
+
+
+def vlen(s):
+    return len(ANSI.sub('', s))
+
+
+def corta(s, n):
+    s = str(s)
+    return s if len(s) <= n else (s[:n - 1] + '…' if n > 1 else s[:max(n, 0)])
+
+
+def corta_esq(s, n):
+    return s if len(s) <= n else '…' + s[-(n - 1):]
+
+
+def caminho_curto(p, n=None):
+    s, casa = str(p), str(Path.home())
+    if s.startswith(casa):
+        s = '~' + s[len(casa):]
+    s = s.replace('\\', '/')
+    return corta_esq(s, n) if n else s
+
+
+def humano(n):
+    for u in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024 or u == 'TB':
+            return f'{n:.0f} {u}' if u in ('B', 'KB') else f'{n:.1f} {u}'.replace('.', ',')
+        n /= 1024
+
 
 def _xterm256(r, g, b):
     niveis = [0, 95, 135, 175, 215, 255]
@@ -161,21 +174,8 @@ def _xterm256(r, g, b):
     ri, gi, bi = perto(r), perto(g), perto(b)
     d_cubo = (niveis[ri] - r) ** 2 + (niveis[gi] - g) ** 2 + (niveis[bi] - b) ** 2
     ci = max(0, min(23, int(round(((r + g + b) / 3 - 8) / 10))))
-    cv = 8 + ci * 10
-    d_cinza = sum((cv - c) ** 2 for c in (r, g, b))
+    d_cinza = sum((8 + ci * 10 - c) ** 2 for c in (r, g, b))
     return 232 + ci if d_cinza < d_cubo else 16 + 36 * ri + 6 * gi + bi
-
-
-# terminais sem cor real ficam com a paleta de 16 cores mais próxima (código ANSI de frente)
-CORES16 = {'texto': 97, 'sub': 37, 'apagado': 90, 'superficie': 90, 'fundo': 90, 'verde': 92, 'vermelho': 91,
-           'amarelo': 93, 'pessego': 33, 'azul': 94, 'roxo': 95}
-# console antigo do Windows (cmd/PowerShell fora do Windows Terminal) e console do Linux: as fontes
-# não têm esses símbolos e mostrariam quadradinhos
-TROCA_SIMPLES = str.maketrans({'✓': '+', '✗': 'x', '↳': '>', '↑': '^', '↻': '*', '→': '->', '●': '•', '◆': '♦'})
-# último recurso (--ascii, ou terminal que não fala UTF-8): só caracteres ASCII
-TROCA_ASCII = str.maketrans({'✓': '+', '✗': 'x', '·': '.', '…': '...', '─': '-', '●': '*', '◆': '>', '■': '#',
-                             '█': '#', '▀': '"', '▄': '_', '↳': '>', '↑': '^', '↻': '*', '→': '->', '—': '-',
-                             '•': '*', '♦': '>', '🔒': ''})
 
 
 class Terminal:
@@ -224,8 +224,7 @@ class Terminal:
         if self.nivel == 'simples':
             return txt.translate(TROCA_SIMPLES)
         import unicodedata
-        txt = txt.translate(TROCA_ASCII)
-        return unicodedata.normalize('NFKD', txt).encode('ascii', 'ignore').decode()
+        return unicodedata.normalize('NFKD', txt.translate(TROCA_ASCII)).encode('ascii', 'ignore').decode()
 
     def _cod(self, nome, fundo=False):
         r, g, b = PALETA[nome]
@@ -266,18 +265,12 @@ class Terminal:
                 sys.stdout.flush()
             self.vivo_txt = ''
 
-    def limpa(self):
-        if self.tty:
-            sys.stdout.write('\033[2J\033[H')
-
-    # ---- peças visuais ----
-    def cabecalho(self, caminho='início'):
+    def cabecalho(self, caminho):
         w = self.largura
         bolas = ' '.join(self.p('●', c) for c in ('vermelho', 'amarelo', 'verde'))
         titulo = 'ferramentas-git — Visual Studio Code' if w >= 60 else 'ferramentas-git'
-        esp = max(2, (w - 6 - len(titulo)) // 2)
         self.escreve()
-        self.escreve(' ' + bolas + ' ' * esp + self.p(titulo, 'apagado'))
+        self.escreve(' ' + bolas + ' ' * max(2, (w - 6 - len(titulo)) // 2) + self.p(titulo, 'apagado'))
         self.escreve(' ' + self.p('~', 'verde') + self.p(f'/{caminho}/', 'texto') + self.p('█', 'verde'))
         self.escreve(' ' + self.p('─' * (w - 1), 'superficie'))
         self.escreve()
@@ -302,8 +295,7 @@ class Terminal:
                      + self.p('>', 'verde') + ' ' + self.p(corta(txt, self.largura - len(pasta) - 8), 'texto'))
 
     def item(self, icone, cor, nome, detalhe='', recuo=2, cor_nome='texto'):
-        w = self.largura
-        d = vlen(detalhe)
+        w, d = self.largura, vlen(detalhe)
         if d and recuo + 6 + min(len(nome), 16) + d > w:
             self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + self.p(corta(nome, w - recuo - 2), cor_nome))
             self.escreve(' ' * (recuo + 2) + detalhe)
@@ -355,35 +347,17 @@ class Terminal:
             return ''
 
 
-def _espera(self, txt):
-    try:
-        input(self._adapta('  ' + self.p(txt, 'apagado') + ' '))
-    except EOFError:
-        pass
-
-
-Terminal.espera = _espera
-
-
-def caminho_curto(p, n=None):
-    s = str(p)
-    casa = str(Path.home())
-    if s.startswith(casa):
-        s = '~' + s[len(casa):]
-    return corta_esq(s, n) if n else s
-
-
 class Progresso:
     QUADROS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
     def __init__(self, term, total, rotulo):
-        self.t, self.total, self.rotulo = term, max(total, 1), rotulo
+        # total None = não se sabe quanto falta: mostra só a contagem
+        self.t, self.total, self.rotulo = term, total, rotulo
         self.n, self.atual, self._i = 0, '', 0
         self._parar = threading.Event()
         self._fio = threading.Thread(target=self._gira, daemon=True)
         if term.nivel != 'pleno':
             self.QUADROS = '|/-\\'
-        # sem cor, quadrado cheio e vazio seriam iguais
         self.cheio = '#' if term.nivel == 'ascii' else '■'
         self.vazio = '■' if term.cor else ('-' if term.nivel == 'ascii' else '·')
 
@@ -398,17 +372,23 @@ class Progresso:
             self._fio.join()
         self.t.para_vivo()
 
-    def avanca(self, atual=''):
-        self.n += 1
+    def avanca(self, atual='', n=1):
+        self.n += n
         self.atual = atual
 
     def _desenho(self):
         t = self.t
         q = self.QUADROS[self._i % len(self.QUADROS)]
         self._i += 1
-        conta = f'{self.n}/{self.total}'
+        if self.total is None:
+            conta = f'{self.n:,}'.replace(',', '.')
+            resto = t.largura - 7 - len(self.rotulo) - len(conta)
+            return (f'  {t.p(q, "verde")} {t.p(self.rotulo, "sub")} {t.p(conta, "texto")} '
+                    f'{t.p(corta_esq(self.atual, max(0, resto)), "apagado")}')
+        total = max(self.total, 1)
+        conta = f'{self.n}/{total}'
         larg = max(6, min(20, t.largura - len(self.rotulo) - len(conta) - 24))
-        cheio = int(larg * self.n / self.total)
+        cheio = int(larg * self.n / total)
         barra = t.p(self.cheio * cheio, 'verde') + t.p(self.vazio * (larg - cheio), 'fundo')
         resto = t.largura - 8 - len(self.rotulo) - larg - len(conta)
         return (f'  {t.p(q, "verde")} {t.p(self.rotulo, "sub")} {barra} {t.p(conta, "texto")} '
@@ -429,14 +409,13 @@ class Relatorio:
     def salva(self):
         pasta = CASA / 'relatorios'
         pasta.mkdir(parents=True, exist_ok=True)
-        arq = pasta / f'{self.nome}-{carimbo()}.txt'
+        arq = pasta / f'{self.nome}-{datetime.now():%Y-%m-%d_%H%M%S}.txt'
         arq.write_text('\n'.join(self.linhas) + '\n', encoding='utf-8')
         return arq
 
 
-def confirma(ctx, pergunta):
-    t = ctx.t
-    if ctx.args.sim:
+def confirma(t, args, pergunta):
+    if args.sim:
         return True
     if not t.interativo:
         t.aviso('Sem terminal para confirmar; use --sim para seguir sem perguntar.')
@@ -445,8 +424,14 @@ def confirma(ctx, pergunta):
     t.escreve('  ' + t.p(pergunta, 'amarelo'))
     return t.pergunta('digite SIM').strip().lower() == 'sim'
 
+# ███████████████████████████████████████████████████████████████████████████
+#
+#   PARTE 1 · SEUS REPOSITÓRIOS NO GITHUB
+#   segredos · branches · demos · backup · deps · coautores
+#
+# ███████████████████████████████████████████████████████████████████████████
 
-# ═══════════════════════════════ GitHub ═══════════════════════════════
+# ═══════════════════════════════ GitHub: login e API ═══════════════════════════════
 
 class ErroAPI(Exception):
     def __init__(self, status, msg):
@@ -726,10 +711,6 @@ REGRAS_FORTES = {'aws', 'github', 'openai', 'anthropic', 'google_oauth', 'slack'
                  'stripe', 'sendgrid', 'npm', 'npmrc', 'telegram', 'mercadopago', 'conta_servico'}
 
 
-def corta_esq(s, n):
-    return s if len(s) <= n else '…' + s[-(n - 1):]
-
-
 def entropia(s):
     if not s:
         return 0.0
@@ -1000,7 +981,7 @@ def ferramenta_segredos(ctx):
                         'não desfaz o vazamento — em repositório público, robôs copiam chaves em minutos.', 4, 'texto')
         t.paragrafo(f'Falso positivo? Ponha o id em {caminho_curto(CASA / "segredos-ignorados.txt")} (um por linha).', 4, 'apagado')
     else:
-        t.ok(f'Nenhum segredo encontrado em {limpos} repositórios.')
+        t.ok(f'Nenhum segredo encontrado em {pl(limpos, "repositório")}.')
     rel.add('', f'{sum(total.values())} achados, {limpos} repositórios limpos')
     t.nota(f'relatório: {caminho_curto(rel.salva(), t.largura - 16)}', 4)
 
@@ -1040,7 +1021,7 @@ def analisa_branches(gh, r):
             elif nome in mesclados:
                 item['motivo'] = f'PR #{mesclados[nome][0]} mesclado, mas tem commits depois'
             else:
-                item['motivo'] = f'{frente} commit{"s" if frente > 1 else ""} fora da {padrao} · {ha_quanto(data)}'
+                item['motivo'] = f'{frente} commit{"s" if frente > 1 else ""} fora da {padrao} · {ha_quanto_iso(data)}'
         saida.append(item)
     return saida
 
@@ -1075,7 +1056,7 @@ def ferramenta_branches(ctx):
     t.titulo('resumo')
     t.partes([t.p(f'{len(apagar)} podem ser apagadas', 'verde'), t.p(f'{manter} ficam', 'sub'),
               t.p(f'{sem_branch} só com a branch principal', 'apagado')])
-    if apagar and not ctx.args.teste and confirma(ctx, f'Apagar {len(apagar)} branch(es) no GitHub?'):
+    if apagar and not ctx.args.teste and confirma(ctx.t, ctx.args, f'Apagar {len(apagar)} branch(es) no GitHub?'):
         CASA.joinpath('branches-apagadas').mkdir(parents=True, exist_ok=True)
         arq = CASA / 'branches-apagadas' / f'{carimbo()}.json'
         feitas = []
@@ -1095,7 +1076,7 @@ def ferramenta_branches(ctx):
         t.escreve()
         t.paragrafo(f'{len(sem_auto)} repositórios não apagam a branch sozinhos depois do merge do PR. '
                     'Ligando essa opção, a faxina passa a ser automática.', 4, 'sub')
-        if confirma(ctx, f'Ligar "apagar branch após o merge" nesses {len(sem_auto)}?'):
+        if confirma(ctx.t, ctx.args, f'Ligar "apagar branch após o merge" nesses {len(sem_auto)}?'):
             ok = sum(1 for r in sem_auto
                      if gh.requisita(f'/repos/{r["full_name"]}', metodo='PATCH', corpo={'delete_branch_on_merge': True})[0] == 200)
             t.ok(f'ligado em {ok} repositórios.')
@@ -1109,7 +1090,7 @@ def restaura_branches(ctx, arq):
         t.erro(f'Não consegui ler {arq}: {e}')
         return
     t.prompt('branches', f'recriando {len(itens)} branch(es) de {arq.name}')
-    if ctx.args.teste or not confirma(ctx, 'Recriar essas branches no GitHub?'):
+    if ctx.args.teste or not confirma(ctx.t, ctx.args, 'Recriar essas branches no GitHub?'):
         return
     for it in itens:
         st, _ = gh.requisita(f'/repos/{it["repo"]}/git/refs', metodo='POST',
@@ -1281,7 +1262,7 @@ def ferramenta_demos(ctx):
                     '(é o link que aparece no topo da página do repositório).', 4, 'sub')
         for r, u in preencher:
             t.item('+', 'verde', r['name'], t.p(re.sub(r'^https?://', '', u), 'apagado'), recuo=4)
-        if confirma(ctx, 'Preencher o campo "site" desses repositórios?'):
+        if confirma(ctx.t, ctx.args, 'Preencher o campo "site" desses repositórios?'):
             ok = sum(1 for r, u in preencher
                      if gh.requisita(f'/repos/{r["full_name"]}', metodo='PATCH', corpo={'homepage': u})[0] == 200)
             t.ok(f'preenchido em {ok}.')
@@ -1898,7 +1879,7 @@ def ferramenta_coautores(ctx):
     if ctx.args.teste:
         t.nota('modo teste: nada foi enviado ao GitHub.', 4)
         return
-    if not confirma(ctx, f'Sobrescrever o histórico desses {len(prontos)} no GitHub (force-push de todas as branches e tags)?'):
+    if not confirma(ctx.t, ctx.args, f'Sobrescrever o histórico desses {len(prontos)} no GitHub (force-push de todas as branches e tags)?'):
         t.nota('cancelado; nada foi enviado.', 4)
         return
     enviados = 0
@@ -1922,87 +1903,3394 @@ def ferramenta_coautores(ctx):
     t.nota(f'para desfazer: git clone --mirror "{caminho_curto(backups)}/<repo>.bundle" x && cd x && '
            f'git push --mirror --force https://github.com/{DONO}/<repo>.git', 4)
 
+# ███████████████████████████████████████████████████████████████████████████
+#
+#   PARTE 2 · SEU COMPUTADOR E SEUS SITES
+#   faxina · portas · raio-x · peso · atualizar
+#
+# ███████████████████████████████████████████████████████████████████████████
 
-# ═══════════════════════════════ menu e entrada ═══════════════════════════════
+# ███████████████████████████████████████████████████████████████████████████
+#
+#   PARTE 2 · SEU COMPUTADOR E SEUS SITES
+#   faxina · portas · raio-x · peso · atualizar
+#
+# ███████████████████████████████████████████████████████████████████████████
 
-EXECUTA = {'segredos': ferramenta_segredos, 'branches': ferramenta_branches, 'demos': ferramenta_demos,
-           'backup': ferramenta_backup, 'deps': ferramenta_deps, 'coautores': ferramenta_coautores}
+# ███████████████████████████████████████████████████████████████████████████
+#
+#   PARTE 2 · SEU COMPUTADOR E SEUS SITES
+#   faxina · portas · raio-x · peso · atualizar
+#
+# ███████████████████████████████████████████████████████████████████████████
+
+# ═══════════════════════════════ 7. faxina ═══════════════════════════════
+
+def idade_projeto(dias, parado=True):
+    if dias is None:
+        return 'sem data'
+    if dias < 1:
+        return 'mexido hoje'
+    verbo = 'parado há' if parado else 'mexido há'
+    if dias < 60:
+        return f'{verbo} {dias} dia' + ('s' if dias > 1 else '')
+    if dias < 730:
+        return f'{verbo} {dias // 30} meses'
+    return f'{verbo} {dias // 365} anos'
 
 
-def roda_ferramenta(ctx, cmd):
-    arquivo, desc = next((a, d) for c, a, d in FERRAMENTAS if c == cmd)
-    ctx.t.aba(arquivo, desc)
+# pasta -> (grupo, arquivos que precisam estar ao lado; vazio = vale em qualquer lugar)
+PACOTES_JS = {'package.json'}
+ALVOS = {
+    'node_modules': ('dependências', PACOTES_JS),
+    '.next': ('build', PACOTES_JS), '.nuxt': ('build', PACOTES_JS), '.svelte-kit': ('build', PACOTES_JS),
+    '.turbo': ('cache', PACOTES_JS), '.parcel-cache': ('cache', PACOTES_JS), '.angular': ('cache', PACOTES_JS),
+    '.astro': ('cache', PACOTES_JS), '.expo': ('cache', PACOTES_JS), '.vercel': ('cache', PACOTES_JS),
+    'coverage': ('build', PACOTES_JS), 'out': ('build', PACOTES_JS),
+    'dist': ('build', PACOTES_JS | {'pyproject.toml', 'setup.py'}),
+    'build': ('build', PACOTES_JS | {'pyproject.toml', 'setup.py', 'build.gradle', 'build.gradle.kts', 'pubspec.yaml'}),
+    'target': ('build', {'Cargo.toml', 'pom.xml'}),
+    '.gradle': ('cache', {'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'}),
+    '.dart_tool': ('cache', {'pubspec.yaml'}),
+    '__pycache__': ('cache', set()), '.pytest_cache': ('cache', set()), '.mypy_cache': ('cache', set()),
+    '.ruff_cache': ('cache', set()), '.tox': ('cache', set()),
+}
+NOMES_VENV = {'venv', '.venv', 'env', 'virtualenv'}
+# saída de build pode estar commitada (ex.: o dist que publica o GitHub Pages): essas conferem o git
+PODE_SER_VERSIONADO = {'dist', 'build', 'out', 'target', 'coverage'}
+MARCAS_PROJETO = {'.git', 'package.json', 'pyproject.toml', 'requirements.txt', 'setup.py', 'Cargo.toml', 'pom.xml',
+                  'build.gradle', 'build.gradle.kts', 'pubspec.yaml', 'go.mod'}
+PULAR = {'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData', '$Recycle.Bin', 'System Volume Information',
+         'AppData', 'Library', 'Applications', 'proc', 'sys', 'dev', 'snap', 'Pictures', 'Music', 'Videos', 'Movies'}
+PROFUNDIDADE = 9
+
+
+def eh_link(e):
+    # symlink, ou junção/ponto de nova análise do Windows (o npm e o pnpm usam): nunca seguir
+    try:
+        if e.is_symlink():
+            return True
+        if os.name == 'nt':
+            return bool(e.stat(follow_symlinks=False).st_file_attributes & 0x400)
+    except OSError:
+        return True
+    return False
+
+
+def tamanho(p):
+    total, pilha = 0, [p]
+    while pilha:
+        atual = pilha.pop()
+        try:
+            with os.scandir(atual) as it:
+                for e in it:
+                    try:
+                        if eh_link(e):
+                            continue
+                        if e.is_dir(follow_symlinks=False):
+                            pilha.append(e.path)
+                        else:
+                            st = e.stat(follow_symlinks=False)
+                            # arquivo com vários "hard links" (o pnpm faz isso) só libera espaço quando
+                            # some de todos os lugares: conta a parte dele
+                            nl = getattr(st, 'st_nlink', 1) or 1
+                            total += st.st_size // nl
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return total
+
+
+def raiz_do_projeto(pasta, limite, cache):
+    if pasta in cache:
+        return cache[pasta]
+    atual, achado = pasta, None
+    while True:
+        try:
+            nomes = set(os.listdir(atual))
+        except OSError:
+            nomes = set()
+        if '.git' in nomes:
+            achado = atual
+            break
+        if achado is None and nomes & MARCAS_PROJETO:
+            achado = atual
+        if os.path.normcase(atual) == os.path.normcase(limite) or os.path.dirname(atual) == atual:
+            break
+        atual = os.path.dirname(atual)
+    cache[pasta] = achado or pasta
+    return cache[pasta]
+
+
+def estado_git(pasta_pai, nome):
+    r = subprocess.run(['git', '-C', pasta_pai, 'ls-files', '--', nome], capture_output=True)
+    if r.returncode != 0:
+        return 'sem_git'
+    return 'versionado' if r.stdout.strip() else 'livre'
+
+
+def varre(raizes, pr):
+    alvos, cache_raiz = [], {}
+    tem_git = shutil.which('git') is not None
+    for raiz in raizes:
+        pilha = [(raiz, 0)]
+        while pilha:
+            pasta, prof = pilha.pop()
+            pr.avanca(caminho_curto(pasta))
+            try:
+                with os.scandir(pasta) as it:
+                    entradas = list(it)
+            except OSError:
+                continue
+            nomes = {e.name for e in entradas}
+            for e in entradas:
+                try:
+                    if eh_link(e) or not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                nome = e.name
+                grupo = None
+                if nome in ALVOS:
+                    g, exige = ALVOS[nome]
+                    if not exige or nomes & exige:
+                        grupo = g
+                elif nome in NOMES_VENV and os.path.isfile(os.path.join(e.path, 'pyvenv.cfg')):
+                    grupo, nome = 'dependências', nome
+                if grupo:
+                    estado = estado_git(pasta, nome) if tem_git else 'sem_git'
+                    # versionado nunca sai; nome ambíguo (build, dist…) fora do git pode ser código-fonte
+                    if estado == 'versionado' or (nome in PODE_SER_VERSIONADO and estado != 'livre'):
+                        continue
+                    alvos.append({'caminho': e.path, 'nome': nome, 'grupo': grupo,
+                                  'projeto': raiz_do_projeto(pasta, raiz, cache_raiz)})
+                    continue
+                if nome.startswith('.') or nome in PULAR or prof >= PROFUNDIDADE:
+                    continue
+                pilha.append((e.path, prof + 1))
+    return alvos
+
+
+def dias_parado(projeto, nomes_alvo):
+    agora = time.time()
+    if os.path.isdir(os.path.join(projeto, '.git')) and shutil.which('git'):
+        r = subprocess.run(['git', '-C', projeto, 'log', '-1', '--format=%ct'], capture_output=True)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            return int((agora - int(r.stdout.strip())) // 86400)
+    ultimo = 0
+    try:
+        with os.scandir(projeto) as it:
+            for e in it:
+                if e.name in nomes_alvo or e.name in ('.git',):
+                    continue
+                try:
+                    ultimo = max(ultimo, e.stat(follow_symlinks=False).st_mtime)
+                except OSError:
+                    pass
+    except OSError:
+        return None
+    return int((agora - ultimo) // 86400) if ultimo else None
+
+
+def roda_cmd(cmd, tempo=60):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=tempo)
+        return r.returncode, r.stdout.decode('utf-8', 'replace').strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ''
+
+
+def caches_globais():
+    casa = Path.home()
+    local = Path(os.environ.get('LOCALAPPDATA') or casa / 'AppData' / 'Local')
+    xdg = Path(os.environ.get('XDG_CACHE_HOME') or casa / '.cache')
+    mac = casa / 'Library' / 'Caches'
+    win = os.name == 'nt'
+    lista = []
+
+    def por_comando(nome, programa, pergunta, padrao, limpeza, obs=''):
+        exe = shutil.which(programa)
+        caminho = None
+        if exe:
+            cod, saida = roda_cmd([exe] + pergunta, 20)
+            if cod == 0 and saida and os.path.isdir(saida.splitlines()[-1].strip()):
+                caminho = saida.splitlines()[-1].strip()
+        caminho = caminho or next((str(p) for p in padrao if p.is_dir()), None)
+        if caminho:
+            lista.append({'nome': nome, 'caminho': caminho, 'comando': [exe] + limpeza if exe else None, 'obs': obs})
+
+    por_comando('npm', 'npm', ['config', 'get', 'cache'], [local / 'npm-cache', casa / '.npm'],
+                ['cache', 'clean', '--force'])
+    por_comando('pnpm', 'pnpm', ['store', 'path'], [local / 'pnpm' / 'store', casa / '.local' / 'share' / 'pnpm' / 'store',
+                                                     casa / 'Library' / 'pnpm' / 'store'],
+                ['store', 'prune'], 'só apaga o que nenhum projeto usa')
+    por_comando('yarn', 'yarn', ['cache', 'dir'], [local / 'Yarn' / 'Cache', xdg / 'yarn', mac / 'Yarn'], ['cache', 'clean'])
+    exe_py = sys.executable
+    cod, saida = roda_cmd([exe_py, '-m', 'pip', 'cache', 'dir'], 20)
+    if cod == 0 and saida and os.path.isdir(saida.splitlines()[-1]):
+        lista.append({'nome': 'pip', 'caminho': saida.splitlines()[-1], 'comando': [exe_py, '-m', 'pip', 'cache', 'purge'], 'obs': ''})
+    por_comando('bun', 'bun', ['pm', 'cache'], [casa / '.bun' / 'install' / 'cache'], ['pm', 'cache', 'rm'])
+    pastas = [
+        ('Playwright', [local / 'ms-playwright', xdg / 'ms-playwright', mac / 'ms-playwright'], 'baixa de novo com "npx playwright install"'),
+        ('Cypress', [local / 'Cypress' / 'Cache', xdg / 'Cypress', mac / 'Cypress'], ''),
+        ('node-gyp', [local / 'node-gyp', xdg / 'node-gyp', mac / 'node-gyp'], ''),
+        ('Electron', [local / 'electron' / 'Cache', xdg / 'electron', mac / 'electron'], ''),
+        ('Gradle', [casa / '.gradle' / 'caches'], ''),
+        ('Maven', [casa / '.m2' / 'repository'], 'o próximo build Java baixa tudo de novo'),
+        ('Deno', [local / 'deno', xdg / 'deno', mac / 'deno'], ''),
+    ]
+    for nome, candidatos, obs in pastas:
+        achado = next((str(p) for p in candidatos if p.is_dir()), None)
+        if achado and not any(os.path.normcase(achado) == os.path.normcase(c['caminho']) for c in lista):
+            lista.append({'nome': nome, 'caminho': achado, 'comando': None, 'obs': obs})
+    return [c for c in lista if not (win and c['caminho'].lower().startswith(os.environ.get('SystemRoot', 'C:\\Windows').lower()))]
+
+
+def apaga(caminho):
+    # no Windows: caminho maior que 260 caracteres precisa do prefixo \\?\, e arquivo somente
+    # leitura (comum dentro de node_modules e .git) precisa perder o atributo antes
+    alvo = caminho
+    if os.name == 'nt':
+        alvo = os.path.abspath(caminho)
+        if not alvo.startswith('\\\\?\\'):
+            alvo = '\\\\?\\' + alvo
+    erros = []
+
+    def ao_errar(funcao, p, _info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            funcao(p)
+        except OSError as e:
+            erros.append(e)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(alvo, onexc=lambda f, p, e: ao_errar(f, p, e))
+    else:
+        shutil.rmtree(alvo, onerror=ao_errar)
+    if os.path.exists(caminho):
+        raise OSError(str(erros[0]) if erros else 'não consegui apagar tudo')
+
+
+def pontos_de_medida(caminhos):
+    # um ponto por disco, escolhido ANTES de apagar: a pasta-mãe continua existindo depois
+    pontos = {}
+    for c in caminhos:
+        mae = os.path.dirname(os.path.abspath(c))
+        try:
+            pontos.setdefault(os.stat(mae).st_dev, mae)
+        except OSError:
+            pass
+    return list(pontos.values())
+
+
+def espaco_livre(pontos):
+    total = 0
+    for p in pontos:
+        try:
+            total += shutil.disk_usage(p).free
+        except OSError:
+            pass
+    return total
+
+
+def ferramenta_faxina(t, args):
+    raizes = [os.path.abspath(os.path.expanduser(p)) for p in (args.pastas or [str(Path.home())])]
+    for r in raizes:
+        if not os.path.isdir(r):
+            t.erro(f'{r} não é uma pasta.')
+            return 1
+    t.prompt('faxina', 'procurando em ' + ', '.join(caminho_curto(r) for r in raizes))
+
+    with Progresso(t, None, 'pastas vistas') as pr:
+        alvos = varre(raizes, pr)
+        caches = caches_globais()
+    medir = alvos + caches
+    with Progresso(t, len(medir), 'medindo') as pr:
+        with ThreadPoolExecutor(8) as ex:
+            futuros = {ex.submit(tamanho, a['caminho']): a for a in medir}
+            for f in as_completed(futuros):
+                futuros[f]['tamanho'] = f.result()
+                pr.avanca(futuros[f]['nome'])
+    alvos = [a for a in alvos if a['tamanho'] >= 1024 * 1024 or a['grupo'] == 'dependências']
+    caches = [c for c in caches if c['tamanho'] >= 1024 * 1024]
+
+    projetos = {}
+    for a in alvos:
+        projetos.setdefault(a['projeto'], {'alvos': [], 'caminho': a['projeto']})['alvos'].append(a)
+    for p in projetos.values():
+        p['tamanho'] = sum(a['tamanho'] for a in p['alvos'])
+        p['dias'] = dias_parado(p['caminho'], {a['nome'] for a in p['alvos']})
+        p['parado'] = p['dias'] is not None and p['dias'] >= args.dias
+    ordem = sorted(projetos.values(), key=lambda p: -p['tamanho'])
+
+    rel = Relatorio('faxina')
+    t.escreve()
+    if not ordem and not caches:
+        t.ok('Nada para limpar: nenhum node_modules, venv, build ou cache encontrado.')
+        return 0
+    mostrar = 15
+    for p in ordem[:mostrar]:
+        cor = 'amarelo' if p['parado'] else 'apagado'
+        t.item('●' if p['parado'] else '·', cor, caminho_curto(p['caminho']),
+               t.p(humano(p['tamanho']), 'texto') + t.p(' · ' + idade_projeto(p['dias'], p['parado']), cor))
+        pedacos = sorted(p['alvos'], key=lambda a: -a['tamanho'])
+        resumo = {}
+        for a in pedacos:
+            resumo[a['nome']] = resumo.get(a['nome'], 0) + a['tamanho']
+        t.partes([t.p(f'{n} {humano(s)}', 'sub') for n, s in list(resumo.items())[:4]]
+                 + ([t.p(f'+{len(resumo) - 4}', 'apagado')] if len(resumo) > 4 else []), recuo=6)
+    for p in ordem:
+        rel.add(f'{p["caminho"]} — {humano(p["tamanho"])} — {idade_projeto(p["dias"], p["parado"])}')
+        for a in p['alvos']:
+            rel.add(f'    {a["caminho"]} ({a["grupo"]}) {humano(a["tamanho"])}')
+    if len(ordem) > mostrar:
+        resto = ordem[mostrar:]
+        t.nota(f'  e mais {len(resto)} projetos menores ({humano(sum(p["tamanho"] for p in resto))})', 2)
+    if caches:
+        t.escreve()
+        t.titulo('caches globais')
+        for c in sorted(caches, key=lambda c: -c['tamanho']):
+            t.item('·', 'azul', c['nome'], t.p(humano(c['tamanho']), 'texto'), recuo=4)
+            if c['obs']:
+                t.nota(corta(c['obs'], t.largura - 8), 6)
+            rel.add(f'cache {c["nome"]}: {c["caminho"]} — {humano(c["tamanho"])}')
+
+    parados = [p for p in ordem if p['parado']]
+    opcoes = [
+        ('1', f'projetos parados há {args.dias}+ dias', parados, sum(p['tamanho'] for p in parados), f'{len(parados)} projetos'),
+        ('2', 'todos os projetos', ordem, sum(p['tamanho'] for p in ordem), f'{len(ordem)} projetos'),
+        ('3', 'caches globais', caches, sum(c['tamanho'] for c in caches), ', '.join(c['nome'] for c in caches[:3])
+         + ('…' if len(caches) > 3 else '')),
+    ]
+    t.escreve()
+    t.titulo('o que dá para liberar')
+    for num, rotulo, itens, total, detalhe in opcoes:
+        esq = f'  {t.p(num, "verde", True)}  {t.p(rotulo, "texto")}'
+        dir_ = t.p(humano(total), 'verde' if total else 'apagado')
+        t.escreve(esq + ' ' * max(1, t.largura - vlen(esq) - vlen(dir_)) + dir_)
+        if detalhe:
+            t.nota(f'     {corta(detalhe, t.largura - 6)}', 0)
+    rel.add('', *(f'{r}: {humano(s)}' for _, r, _, s, _ in opcoes))
+    arq = rel.salva()
+
+    if args.teste:
+        t.escreve()
+        t.nota('modo teste: nada foi apagado.', 4)
+        t.nota(f'relatório: {caminho_curto(arq, t.largura - 16)}', 4)
+        return 0
+    if args.sim:
+        escolha = {'1'}
+    elif not t.interativo:
+        t.aviso('Sem terminal para escolher; use --sim para limpar os projetos parados.')
+        return 0
+    else:
+        t.escreve()
+        t.nota('escolha um ou mais números (ex.: 1 3); Enter = 1', 2)
+        escolha = set(re.findall(r'[123]', t.pergunta('faxina/limpar'))) or {'1'}
+    lixo = []
+    if '2' in escolha:
+        lixo += [a for p in ordem for a in p['alvos']]
+    elif '1' in escolha:
+        lixo += [a for p in parados for a in p['alvos']]
+    if '3' in escolha:
+        lixo += caches
+    if not lixo:
+        t.ok('Nada selecionado.')
+        return 0
+    total = sum(a['tamanho'] for a in lixo)
+    if not confirma(t, args, f'Apagar {len(lixo)} pastas ({humano(total)})? Tudo se recria com npm/pnpm/pip install.'):
+        t.nota('cancelado; nada foi apagado.', 4)
+        return 0
+
+    pontos = pontos_de_medida([a['caminho'] for a in lixo])
+    livre_antes = espaco_livre(pontos)
+    falhas = []
+    with Progresso(t, len(lixo), 'apagando') as pr:
+        for a in lixo:
+            try:
+                if a.get('comando'):
+                    cod, _ = roda_cmd(a['comando'], 600)
+                    if cod != 0:
+                        raise OSError(f'{" ".join(os.path.basename(x) for x in a["comando"][:2])} falhou')
+                else:
+                    apaga(a['caminho'])
+            except OSError as e:
+                falhas.append((a, str(e)))
+            pr.avanca(a['nome'])
+    medido = espaco_livre(pontos) - livre_antes
+    falhou = {id(a) for a, _ in falhas}
+    estimado = sum(a['tamanho'] for a in lixo if id(a) not in falhou)
+    # outro programa pode ter escrito ou apagado no disco ao mesmo tempo: só confia no que é plausível
+    liberado = medido if 0 < medido <= estimado * 1.2 + 64 * 1024 * 1024 else estimado
+    t.escreve()
+    for a, erro in falhas[:8]:
+        t.erro(caminho_curto(a['caminho'], t.largura - 6))
+        t.nota(corta(erro, t.largura - 6), 4)
+    if falhas:
+        t.paragrafo('O que falhou costuma estar em uso: feche o editor ou o servidor de desenvolvimento e rode de novo.',
+                    4, 'apagado')
+    t.titulo('resumo')
+    t.partes([t.p(f'{humano(liberado)} liberados', 'verde'),
+              t.p(f'{len(lixo) - len(falhas)} pastas apagadas', 'texto')]
+             + ([t.p(f'{len(falhas)} falharam', 'vermelho')] if falhas else []))
+    t.paragrafo('Para voltar a usar um projeto: npm install (ou pnpm install, ou pip install -r requirements.txt).',
+                4, 'apagado')
+    return 0
+
+
+# ═══════════════════════════════ 8. portas ═══════════════════════════════
+
+PORTAS_CONHECIDAS = {
+    3000: 'React/Next/Express', 3001: 'servidor de dev', 3333: 'API', 4000: 'servidor de dev', 4173: 'Vite (preview)',
+    4200: 'Angular', 5000: 'Flask', 5173: 'Vite', 5174: 'Vite', 5432: 'PostgreSQL', 5555: 'Prisma Studio',
+    6006: 'Storybook', 6379: 'Redis', 3306: 'MySQL', 8000: 'Django/uvicorn', 8080: 'servidor de dev',
+    8081: 'Metro (Expo)', 9229: 'depurador do Node', 19000: 'Expo', 24678: 'Vite (recarga)', 27017: 'MongoDB',
+}
+PORTAS_DEV = {3000, 3001, 3333, 4000, 4173, 4200, 5000, 5173, 5174, 5555, 6006, 8000, 8080, 8081, 19000, 24678}
+FRAMEWORKS = [
+    (r'[\\/]next[\\/]|next(\.js)? (dev|start)', 'Next.js'), (r'[\\/]vite[\\/]|\bvite\b', 'Vite'),
+    (r'react-scripts', 'Create React App'), (r'[\\/]nuxt|nuxi', 'Nuxt'), (r'[\\/]astro[\\/]|\bastro\b', 'Astro'),
+    (r'@nestjs|nest start', 'NestJS'), (r'storybook', 'Storybook'), (r'prisma studio|[\\/]prisma[\\/]', 'Prisma Studio'),
+    (r'expo|metro', 'Expo'), (r'webpack', 'webpack'), (r'nodemon', 'nodemon'), (r'\btsx\b', 'tsx'),
+    (r'ts-node', 'ts-node'), (r'json-server', 'json-server'), (r'live-server', 'Live Server'),
+    (r'uvicorn', 'uvicorn'), (r'gunicorn', 'gunicorn'), (r'flask', 'Flask'), (r'manage\.py', 'Django'),
+    (r'http\.server', 'http.server'), (r'vercel', 'vercel dev'), (r'--watch', 'node --watch'),
+]
+FRAMEWORKS = [(re.compile(r, re.I), n) for r, n in FRAMEWORKS]
+SISTEMA = {'system', 'svchost.exe', 'wininit.exe', 'services.exe', 'lsass.exe', 'csrss.exe', 'smss.exe',
+           'init', 'systemd', 'launchd', 'kernel_task'}
+
+
+def roda_txt(cmd, tempo=20):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=tempo)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ''
+    return r.returncode, r.stdout.decode('utf-8', 'replace')
+
+
+def _endereco_hex(h):
+    import socket
+    dados = bytes.fromhex(h)
+    if len(dados) == 4:
+        return socket.inet_ntop(socket.AF_INET, dados[::-1])
+    # o kernel grava IPv6 em palavras de 4 bytes na ordem da máquina
+    return socket.inet_ntop(socket.AF_INET6, b''.join(dados[i:i + 4][::-1] for i in range(0, 16, 4)))
+
+
+def _info_linux(pid):
+    info = {'nome': None, 'cmd': '', 'cwd': None, 'inicio': None, 'usuario': None}
+    if pid is None:
+        return info
+    base = f'/proc/{pid}'
+    try:
+        info['nome'] = open(f'{base}/comm').read().strip()
+        info['cmd'] = open(f'{base}/cmdline', 'rb').read().replace(b'\0', b' ').decode('utf-8', 'replace').strip()
+    except OSError:
+        pass
+    try:
+        info['cwd'] = os.readlink(f'{base}/cwd')
+    except OSError:
+        pass
+    try:
+        import pwd
+        info['usuario'] = pwd.getpwuid(os.stat(base).st_uid).pw_name
+    except (OSError, KeyError, ImportError):
+        pass
+    try:
+        campos = open(f'{base}/stat').read().rsplit(')', 1)[1].split()
+        boot = next(int(l.split()[1]) for l in open('/proc/stat') if l.startswith('btime'))
+        info['inicio'] = boot + int(campos[19]) / os.sysconf('SC_CLK_TCK')
+    except (OSError, StopIteration, ValueError, IndexError):
+        pass
+    return info
+
+
+def _ouvintes_linux():
+    alvo = {}
+    for arq in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            linhas = open(arq).read().splitlines()[1:]
+        except OSError:
+            continue
+        for l in linhas:
+            c = l.split()
+            if len(c) < 10 or c[3] != '0A':  # 0A = LISTEN
+                continue
+            end, porta = c[1].split(':')
+            alvo[c[9]] = (int(porta, 16), _endereco_hex(end))
+    donos = {}
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f'/proc/{pid}/fd')
+        except OSError:
+            continue  # processo de outro usuário: só o administrador vê
+        for fd in fds:
+            try:
+                link = os.readlink(f'/proc/{pid}/fd/{fd}')
+            except OSError:
+                continue
+            if link.startswith('socket:[') and link[8:-1] in alvo:
+                donos.setdefault(link[8:-1], int(pid))
+    return [dict({'porta': p, 'endereco': e, 'pid': donos.get(i)}, **_info_linux(donos.get(i))) for i, (p, e) in alvo.items()]
+
+
+def _etime(txt):
+    # formato do ps: [[DD-]HH:]MM:SS
+    dias, _, resto = txt.strip().rpartition('-')
+    partes = [int(x) for x in resto.split(':') if x.isdigit()]
+    seg = 0
+    for x in partes:
+        seg = seg * 60 + x
+    return seg + (int(dias) * 86400 if dias.isdigit() else 0)
+
+
+def _ouvintes_lsof():
+    cod, out = roda_txt(['lsof', '-nP', '-iTCP', '-sTCP:LISTEN', '-FpcLn'])
+    res, pid, nome, usuario = [], None, None, None
+    for l in out.splitlines():
+        k, v = l[:1], l[1:]
+        if k == 'p':
+            pid = int(v)
+        elif k == 'c':
+            nome = v
+        elif k == 'L':
+            usuario = v
+        elif k == 'n' and ':' in v:
+            end, _, porta = v.rpartition(':')
+            end = end.strip('[]')
+            if porta.isdigit():
+                res.append({'porta': int(porta), 'endereco': '0.0.0.0' if end == '*' else end, 'pid': pid,
+                            'nome': nome, 'usuario': usuario, 'cmd': '', 'cwd': None, 'inicio': None})
+    for pid in {r['pid'] for r in res}:
+        _, linha = roda_txt(['ps', '-o', 'etime=', '-o', 'command=', '-p', str(pid)])
+        etime, _, cmd = linha.strip().partition(' ')
+        _, cwd = roda_txt(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'])
+        cwd = next((l[1:] for l in cwd.splitlines() if l.startswith('n')), None)
+        for r in res:
+            if r['pid'] == pid:
+                r.update(cmd=cmd.strip(), cwd=cwd, inicio=time.time() - _etime(etime) if etime else None)
+    return res
+
+
+def _ouvintes_windows():
+    res = []
+    for proto in ('TCP', 'TCPv6'):
+        _, out = roda_txt(['netstat', '-ano', '-p', proto])
+        for l in out.splitlines():
+            c = l.split()
+            # porta escutando = endereço remoto zerado; não depende de "LISTENING", que muda com o idioma
+            if len(c) >= 5 and c[0].upper().startswith('TCP') and c[2] in ('0.0.0.0:0', '[::]:0') and c[-1].isdigit():
+                end, _, porta = c[1].rpartition(':')
+                if porta.isdigit():
+                    res.append({'porta': int(porta), 'endereco': end.strip('[]'), 'pid': int(c[-1]),
+                                'nome': None, 'cmd': '', 'cwd': None, 'inicio': None, 'usuario': None})
+    pids = sorted({r['pid'] for r in res if r['pid'] > 4})
+    info = {}
+    if pids:
+        filtro = ' OR '.join(f'ProcessId={p}' for p in pids)
+        script = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-CimInstance Win32_Process -Filter '" + filtro + "' | "
+                  "Select-Object ProcessId,Name,CommandLine,@{n='Inicio';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | "
+                  "ConvertTo-Json -Compress")
+        cod, out = roda_txt(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], 40)
+        try:
+            dados = json.loads(out) if out.strip() else []
+            for d in (dados if isinstance(dados, list) else [dados]):
+                inicio = None
+                if d.get('Inicio'):
+                    try:
+                        inicio = datetime.fromisoformat(d['Inicio'][:26].rstrip('Z')).replace(tzinfo=timezone.utc).timestamp()
+                    except ValueError:
+                        pass
+                info[d['ProcessId']] = {'nome': d.get('Name'), 'cmd': d.get('CommandLine') or '', 'inicio': inicio}
+        except ValueError:
+            pass
+        if not info:
+            _, out = roda_txt(['tasklist', '/FO', 'CSV', '/NH'])
+            for l in out.splitlines():
+                partes = [x.strip('"') for x in l.split('","')]
+                if len(partes) > 1 and partes[1].isdigit():
+                    info[int(partes[1])] = {'nome': partes[0], 'cmd': '', 'inicio': None}
+    for r in res:
+        r.update(info.get(r['pid'], {'nome': 'System' if r['pid'] in (0, 4) else None}))
+    return res
+
+
+def ouvintes():
+    if os.name == 'nt':
+        brutos = _ouvintes_windows()
+    elif os.path.exists('/proc/net/tcp'):
+        brutos = _ouvintes_linux()
+    else:
+        brutos = _ouvintes_lsof()
+    # a mesma porta costuma aparecer em IPv4 e IPv6: junta, e "rede" ganha de "só este PC"
+    juntos = {}
+    for r in brutos:
+        chave = (r['porta'], r['pid'])
+        atual = juntos.setdefault(chave, dict(r, enderecos=set()))
+        atual['enderecos'].add(r['endereco'])
+    for r in juntos.values():
+        r['rede'] = any(e in ('0.0.0.0', '::', '*') for e in r['enderecos'])
+        r['framework'] = next((n for rx, n in FRAMEWORKS if rx.search(r.get('cmd') or '')), None)
+        if not r.get('cwd'):
+            # sem a pasta atual (Windows), o caminho do node_modules na linha de comando entrega o projeto
+            m = re.search(r'([A-Za-z]:)?[\\/][^"\s]*?(?=[\\/]node_modules[\\/])', r.get('cmd') or '')
+            r['projeto'] = m.group(0) if m else None
+        else:
+            r['projeto'] = r['cwd']
+        r['dev'] = bool(r['framework']) or r['porta'] in PORTAS_DEV
+    return sorted(juntos.values(), key=lambda r: r['porta'])
+
+
+def tempo_rodando(inicio):
+    if not inicio:
+        return ''
+    s = max(0, time.time() - inicio)
+    if s < 60:
+        return 'agora'
+    if s < 3600:
+        return f'{int(s // 60)} min'
+    if s < 86400:
+        return f'{int(s // 3600)} h'
+    return f'{int(s // 86400)} dia' + ('s' if s >= 2 * 86400 else '')
+
+
+def _vivo(pid):
+    if os.name == 'nt':
+        _, out = roda_txt(['tasklist', '/FI', f'PID eq {pid}', '/NH'])
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _descendentes(pid):
+    _, out = roda_txt(['ps', '-A', '-o', 'pid=', '-o', 'ppid='])
+    filhos = {}
+    for l in out.splitlines():
+        c = l.split()
+        if len(c) == 2 and c[0].isdigit() and c[1].isdigit():
+            filhos.setdefault(int(c[1]), []).append(int(c[0]))
+    ordem, fila = [], [pid]
+    while fila:
+        atual = fila.pop()
+        for f in filhos.get(atual, []):
+            ordem.append(f)
+            fila.append(f)
+    return ordem
+
+
+def encerra(pid):
+    # primeiro pede para fechar (o servidor salva o que precisa); só força se não obedecer em 3 s
+    import signal
+    for forcar in (False, True):
+        if os.name == 'nt':
+            roda_txt(['taskkill', '/PID', str(pid), '/T'] + (['/F'] if forcar else []))
+        else:
+            for p in list(reversed(_descendentes(pid))) + [pid]:
+                try:
+                    os.kill(p, signal.SIGKILL if forcar else signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        for _ in range(30):
+            if not _vivo(pid):
+                return 'forçado' if forcar else 'fechou'
+            time.sleep(0.1)
+    return None
+
+
+def porta_livre(inicio):
+    import socket
+    for p in range(inicio, min(inicio + 500, 65536)):
+        livre = True
+        for end in ('127.0.0.1', '0.0.0.0'):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind((end, p))
+            except OSError:
+                livre = False
+            finally:
+                s.close()
+        if livre:
+            return p
+    return None
+
+
+def mostra_ouvinte(t, r, detalhado=False):
+    rotulo = r['framework'] or r.get('nome') or '?'
+    if not r['framework'] and r['porta'] in PORTAS_CONHECIDAS and not r['dev']:
+        rotulo = f'{rotulo} ({PORTAS_CONHECIDAS[r["porta"]]})'
+    pedacos = []
+    if r.get('projeto'):
+        pedacos.append(t.p(corta(os.path.basename(r['projeto'].rstrip('/\\')) or r['projeto'], 22), 'sub'))
+    if r.get('inicio'):
+        pedacos.append(t.p(tempo_rodando(r['inicio']), 'apagado'))
+    if r['rede'] and r['dev']:
+        pedacos.append(t.p('rede', 'amarelo'))
+    t.item('●' if r['dev'] else '·', 'verde' if r['dev'] else 'apagado', f'{r["porta"]:<5} {rotulo}',
+           t.p(' · ', 'apagado').join(pedacos), cor_nome='texto' if r['dev'] else 'sub')
+    if detalhado:
+        if r.get('projeto'):
+            t.nota(caminho_curto(r['projeto'], t.largura - 8), 8)
+        if r.get('cmd'):
+            t.nota(corta(r['cmd'], t.largura - 8), 8)
+        t.nota(f'processo {r["pid"]}' + (f' · {r["nome"]}' if r.get('nome') else '')
+               + (f' · usuário {r["usuario"]}' if r.get('usuario') else ''), 8)
+        if r['rede'] and r['dev']:
+            t.paragrafo('Aberto para a rede toda: qualquer pessoa no mesmo Wi-Fi acessa esse servidor. '
+                        'Se não for de propósito, rode com --host 127.0.0.1 (ou localhost).', 8, 'amarelo')
+
+
+def encerra_com_confirmacao(t, args, r):
+    nome = (r.get('nome') or '').lower()
+    if r['pid'] in (None, 0, 1, 4) or nome in SISTEMA:
+        t.erro('É um processo do sistema; não vou encerrar.')
+        return
+    if r.get('usuario') and r['usuario'] != _usuario_atual():
+        t.aviso(f'Esse processo é do usuário {r["usuario"]}: pode precisar de administrador.')
+    rotulo = r['framework'] or r.get('nome') or f'processo {r["pid"]}'
+    if not confirma(t, args, f'Encerrar {rotulo} (processo {r["pid"]}) na porta {r["porta"]}?'):
+        t.nota('nada foi encerrado.', 4)
+        return
+    resultado = encerra(r['pid'])
+    if resultado == 'fechou':
+        t.ok(f'{rotulo} fechou. A porta {r["porta"]} está livre.')
+    elif resultado == 'forçado':
+        t.ok(f'{rotulo} não respondeu e foi encerrado à força. A porta {r["porta"]} está livre.')
+    else:
+        t.erro('Não consegui encerrar; tente de novo como administrador.')
+
+
+def _usuario_atual():
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return None
+
+
+def ferramenta_portas(t, args):
+    if args.livre is not None:
+        p = porta_livre(args.livre)
+        if p is None:
+            t.erro(f'Nenhuma porta livre entre {args.livre} e {args.livre + 499}.')
+        else:
+            t.prompt('portas', f'próxima porta livre a partir da {args.livre}:')
+            t.escreve('    ' + t.p(str(p), 'verde', True))
+        return 0
+    with Progresso(t, None, 'olhando as portas') as pr:
+        lista = ouvintes()
+        pr.avanca('', len(lista))
+    if args.porta:
+        da_porta = [r for r in lista if r['porta'] == args.porta]
+        if not da_porta:
+            t.ok(f'A porta {args.porta} está livre.')
+            return 0
+        t.prompt('portas', f'quem está na {args.porta}')
+        t.escreve()
+        for r in da_porta:
+            mostra_ouvinte(t, r, detalhado=True)
+        if args.matar or (t.interativo and not args.teste):
+            t.escreve()
+            for r in da_porta:
+                encerra_com_confirmacao(t, args, r)
+        return 0
+    visiveis = lista if args.todas else [r for r in lista if r['dev'] or r['porta'] < 10000]
+    escondidas = len(lista) - len(visiveis)
+    dev = sum(1 for r in visiveis if r['dev'])
+    t.prompt('portas', f'{len(visiveis)} porta{"s" if len(visiveis) != 1 else ""} abertas · {dev} de desenvolvimento')
+    t.escreve()
+    if not visiveis:
+        t.ok('Nenhuma porta aberta.')
+    for r in visiveis:
+        mostra_ouvinte(t, r)
+    if escondidas:
+        t.paragrafo(f'+ {escondidas} portas altas de sistema (veja com --todas)', 4, 'apagado')
+    sem_dono = sum(1 for r in visiveis if r['pid'] is None)
+    if sem_dono:
+        t.paragrafo(f'{sem_dono} sem processo visível: são de outro usuário (rode como administrador para ver).',
+                    4, 'apagado')
+    expostas = [r for r in visiveis if r['rede'] and r['dev']]
+    if expostas:
+        t.escreve()
+        um = len(expostas) == 1
+        t.paragrafo(f'{len(expostas)} servidor{"" if um else "es"} de desenvolvimento '
+                    f'abert{"o" if um else "os"} para a rede toda (marcado{"" if um else "s"} com "rede"). '
+                    'Quem estiver no mesmo Wi-Fi consegue acessar.', 4, 'amarelo')
+    if t.interativo and not args.teste and visiveis:
+        t.escreve()
+        t.nota('digite uma porta para ver os detalhes e encerrar; Enter = sair', 2)
+        escolha = t.pergunta('portas/encerrar').strip()
+        if escolha.isdigit():
+            alvo = [r for r in visiveis if r['porta'] == int(escolha)]
+            if not alvo:
+                t.ok(f'A porta {escolha} está livre.')
+            for r in alvo:
+                t.escreve()
+                mostra_ouvinte(t, r, detalhado=True)
+                encerra_com_confirmacao(t, args, r)
+    return 0
+
+
+# ═══════════════════════════════ 9. raio-x ═══════════════════════════════
+
+UA_NAVEGADOR = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0 Safari/537.36 ferramentas-git/raiox')
+ERROS_REDE = {6: 'o domínio não existe', 7: 'conexão recusada', 28: 'demorou demais', 35: 'erro de HTTPS',
+              47: 'redirecionamentos demais', 51: 'certificado HTTPS inválido', 52: 'o servidor não respondeu',
+              56: 'a conexão caiu', 58: 'certificado HTTPS inválido', 60: 'certificado HTTPS inválido'}
+CATEGORIAS = [('desempenho', 'desempenho'), ('acessibilidade', 'acessibilidade'), ('boas-praticas', 'boas práticas'),
+              ('seo', 'SEO'), ('seguranca', 'segurança'), ('links', 'links')]
+PESO_NIVEL = {'falha': 0, 'aviso': 2, 'info': 3, 'ok': 3}
+
+
+def _arquivo_tmp(sufixo):
+    pasta = CASA / 'tmp'
+    pasta.mkdir(parents=True, exist_ok=True)
+    return pasta / f'r{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}{sufixo}'
+
+
+def busca(url, metodo='GET', tempo=25, seguir=True, corpo=True):
+    cab, saida = _arquivo_tmp('.h'), _arquivo_tmp('.b')
+    fmt = '\t'.join(['%{http_code}', '%{url_effective}', '%{http_version}', '%{time_starttransfer}',
+                     '%{time_total}', '%{size_download}'])
+    args = ['curl', '-sS', '--compressed', '--max-time', str(tempo), '-A', UA_NAVEGADOR, '-D', str(cab),
+            '-o', str(saida) if corpo else os.devnull, '-w', fmt]
+    if seguir:
+        args += ['-L', '--max-redirs', '10']
+    if metodo == 'HEAD':
+        args += ['-I']
+    args.append(url)
+    res = {'url': url, 'status': 0, 'url_final': url, 'http': '', 'ttfb': 0.0, 'total': 0.0, 'baixado': 0,
+           'cabecalhos': {}, 'cookies': [], 'cadeia': [], 'corpo': b'', 'erro': None}
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=tempo + 10)
+        partes = r.stdout.decode('utf-8', 'replace').strip().split('\t')
+        if len(partes) >= 6 and partes[0].isdigit():
+            num = lambda x: float(x.replace(',', '.') or 0)
+            res.update(status=int(partes[0]), url_final=partes[1] or url, http=partes[2], ttfb=num(partes[3]),
+                       total=num(partes[4]), baixado=int(num(partes[5])))
+        if r.returncode != 0 and not res['status']:
+            res['erro'] = ERROS_REDE.get(r.returncode, f'erro de rede (curl {r.returncode})')
+        if cab.exists():
+            for bloco in re.split(r'\r?\n\r?\n', cab.read_text('utf-8', 'replace').strip()):
+                linhas = bloco.splitlines()
+                if not linhas or not linhas[0].upper().startswith('HTTP'):
+                    continue
+                status = linhas[0].split()[1] if len(linhas[0].split()) > 1 else '?'
+                hdr, cookies = {}, []
+                for l in linhas[1:]:
+                    k, _, v = l.partition(':')
+                    k, v = k.strip().lower(), v.strip()
+                    if k == 'set-cookie':
+                        cookies.append(v)
+                    elif k:
+                        hdr[k] = v
+                res['cadeia'].append((status, hdr.get('location', '')))
+                res['cabecalhos'], res['cookies'] = hdr, cookies
+        if corpo and saida.exists():
+            res['corpo'] = saida.read_bytes()
+    except (OSError, subprocess.TimeoutExpired):
+        res['erro'] = 'demorou demais'
+    finally:
+        for f in (cab, saida):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return res
+
+
+def acha_navegador():
+    if os.environ.get('CHROME_PATH') and os.path.exists(os.environ['CHROME_PATH']):
+        return os.environ['CHROME_PATH']
+    cands = []
+    if os.name == 'nt':
+        for base in (os.environ.get('PROGRAMFILES'), os.environ.get('PROGRAMFILES(X86)'), os.environ.get('LOCALAPPDATA')):
+            if base:
+                cands += [os.path.join(base, *p) for p in (('Google', 'Chrome', 'Application', 'chrome.exe'),
+                                                          ('Microsoft', 'Edge', 'Application', 'msedge.exe'),
+                                                          ('BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+                                                          ('Chromium', 'Application', 'chrome.exe'))]
+    elif sys.platform == 'darwin':
+        cands = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                 '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+                 '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+                 '/Applications/Chromium.app/Contents/MacOS/Chromium']
+    else:
+        cands = [shutil.which(n) for n in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+                                           'microsoft-edge', 'brave-browser')]
+    return next((c for c in cands if c and os.path.exists(c)), None)
+
+
+def _flags_navegador():
+    flags = ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--mute-audio']
+    if os.name != 'nt' and hasattr(os, 'geteuid') and os.geteuid() == 0:
+        flags.append('--no-sandbox')  # o Chrome se recusa a abrir como root sem isso
+    return flags
+
+
+def dom_renderizado(nav, url):
+    try:
+        r = subprocess.run([nav] + _flags_navegador() + ['--virtual-time-budget=8000', '--dump-dom', url],
+                           capture_output=True, timeout=90)
+        html = r.stdout.decode('utf-8', 'replace')
+        return html if '<' in html else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def roda_lighthouse(url, nav, desktop, categorias='performance,accessibility,best-practices,seo'):
+    npx = shutil.which('npx')
+    if not npx:
+        return None, 'sem Node instalado (o Lighthouse roda com npx)'
+    if not nav:
+        return None, 'nenhum Chrome, Edge ou Brave encontrado'
+    saida = _arquivo_tmp('.json')
+    cmd = [npx, '--yes', 'lighthouse@12', url, '--output=json', f'--output-path={saida}', '--quiet',
+           '--chrome-flags=' + ' '.join(_flags_navegador()), '--locale=pt-BR',
+           '--only-categories=' + categorias]
+    if desktop:
+        cmd.append('--preset=desktop')
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=420, env=dict(os.environ, CHROME_PATH=nav))
+    except (OSError, subprocess.TimeoutExpired):
+        return None, 'o Lighthouse demorou demais'
+    if not saida.exists():
+        erro = [l for l in r.stderr.decode('utf-8', 'replace').splitlines() if l.strip()]
+        return None, corta(erro[-1] if erro else 'o Lighthouse falhou', 70)
+    try:
+        dados = json.loads(saida.read_text(encoding='utf-8'))
+    except ValueError:
+        return None, 'resposta do Lighthouse ilegível'
+    finally:
+        saida.unlink()
+    return dados, None
+
+
+VAZIOS = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'}
+CAPTURA = {'a', 'button', 'label', 'title', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'summary'}
+MARCOS = {'main': 'main', 'nav': 'navigation', 'header': 'banner', 'footer': 'contentinfo'}
+
+
+class LeitorHTML:
+    def __init__(self, html):
+        from html.parser import HTMLParser
+        leitor = self
+
+        class _P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                leitor._abre(tag, {k: (v if v is not None else '') for k, v in attrs})
+
+            def handle_startendtag(self, tag, attrs):
+                leitor._abre(tag, {k: (v if v is not None else '') for k, v in attrs})
+                if tag in CAPTURA:
+                    leitor._fecha(tag)
+
+            def handle_endtag(self, tag):
+                leitor._fecha(tag)
+
+            def handle_data(self, data):
+                leitor._dado(data)
+
+        self.lang = None
+        self.titulo = None
+        self.metas, self.links, self.titulos, self.imgs, self.scripts = [], [], [], [], []
+        self.campos, self.botoes, self.ancoras, self.iframes, self.midias, self.jsonld = [], [], [], [], [], []
+        self.rotulos_for, self.marcos, self.ids = set(), set(), Counter()
+        self.estilos_head = self.tabindex_pos = self.elementos = 0
+        self._head = self._corpo = False
+        self._label = 0
+        self._codigo = None
+        self._pilha = []
+        self._texto = []
+        try:
+            p = _P(convert_charrefs=True)
+            p.feed(html)
+            p.close()
+        except Exception:  # HTML muito quebrado: fica com o que deu para ler
+            pass
+        self.texto = ' '.join(self._texto)
+
+    def _abre(self, tag, a):
+        self.elementos += 1
+        if a.get('id'):
+            self.ids[a['id']] += 1
+        ti = (a.get('tabindex') or '').strip()
+        if ti.isdigit() and int(ti) > 0:
+            self.tabindex_pos += 1
+        if a.get('role') in MARCOS.values():
+            self.marcos.add(a['role'])
+        if tag in MARCOS:
+            self.marcos.add(MARCOS[tag])
+        if tag == 'html':
+            self.lang = a.get('lang') or a.get('xml:lang')
+        elif tag == 'head':
+            self._head = True
+        elif tag == 'body':
+            self._head, self._corpo = False, True
+        elif tag == 'meta':
+            self.metas.append(a)
+        elif tag == 'link':
+            self.links.append(a)
+            if self._head and 'stylesheet' in (a.get('rel') or '').lower():
+                self.estilos_head += 1
+        elif tag == 'img':
+            self.imgs.append(a)
+            for el in self._pilha:
+                el['imgs'].append(a.get('alt'))
+        elif tag in ('script', 'style'):
+            if tag == 'script':
+                self.scripts.append(dict(a, _head=self._head))
+            self._codigo = [] if (a.get('type') or '').lower() == 'application/ld+json' else False
+        elif tag in ('input', 'select', 'textarea'):
+            self.campos.append(dict(a, _tag=tag, _em_label=self._label > 0))
+        elif tag == 'iframe':
+            self.iframes.append(a)
+        elif tag in ('video', 'audio'):
+            self.midias.append(dict(a, _tag=tag))
+        if tag == 'label':
+            self._label += 1
+            if a.get('for'):
+                self.rotulos_for.add(a['for'])
+        if tag in CAPTURA:
+            self._pilha.append({'tag': tag, 'a': a, 'texto': [], 'imgs': []})
+
+    def _fecha(self, tag):
+        if tag == 'head':
+            self._head = False
+        elif tag == 'label' and self._label:
+            self._label -= 1
+        elif tag in ('script', 'style'):
+            if isinstance(self._codigo, list):
+                self.jsonld.append(''.join(self._codigo))
+            self._codigo = None
+        if tag in CAPTURA:
+            for i in range(len(self._pilha) - 1, -1, -1):
+                if self._pilha[i]['tag'] == tag:
+                    self._registra(self._pilha.pop(i))
+                    break
+
+    def _dado(self, d):
+        if self._codigo is not None:
+            if isinstance(self._codigo, list):
+                self._codigo.append(d)
+            return
+        for el in self._pilha:
+            el['texto'].append(d)
+        if self._corpo and d.strip():
+            self._texto.append(d.strip())
+
+    def _registra(self, el):
+        a, tag = el['a'], el['tag']
+        txt = ' '.join(''.join(el['texto']).split())
+        nome = (txt or (a.get('aria-label') or '').strip() or (a.get('title') or '').strip()
+                or ' '.join(x for x in el['imgs'] if x) or ('(aria-labelledby)' if a.get('aria-labelledby') else ''))
+        if tag == 'title':
+            if self.titulo is None:
+                self.titulo = txt
+        elif tag[0] == 'h' and tag[1:].isdigit():
+            self.titulos.append((int(tag[1]), txt))
+        elif tag == 'a':
+            self.ancoras.append({'href': a.get('href'), 'nome': nome, 'texto': txt, 'target': a.get('target'),
+                                 'rel': a.get('rel') or ''})
+        elif tag == 'button':
+            self.botoes.append({'nome': nome, 'classe': a.get('class') or '', 'id': a.get('id') or ''})
+
+    def meta(self, chave):
+        for m in self.metas:
+            if (m.get('name') or m.get('property') or '').lower() == chave:
+                return (m.get('content') or '').strip()
+        return None
+
+    def link_rel(self, rel):
+        return [l for l in self.links if rel in (l.get('rel') or '').lower().split()]
+
+
+def pl(n, sing, plur=None):
+    return f'{n} {sing if n == 1 else (plur or sing + "s")}'
+
+
+def ach(cat, nivel, ident, titulo, exemplos=None, dica='', ref=''):
+    return {'cat': cat, 'nivel': nivel, 'id': ident, 'titulo': titulo, 'exemplos': exemplos or [], 'dica': dica, 'ref': ref}
+
+
+GENERICOS = re.compile(r'^(clique aqui|clique|aqui|saiba mais|leia mais|veja mais|mais|link|click here|here|read more|learn more)$', re.I)
+
+
+def checa_acessibilidade(d):
+    A = []
+    A.append(ach('acessibilidade', 'ok' if d.lang else 'falha', 'lang', 'idioma da página (<html lang>)',
+                 dica='ponha <html lang="pt-BR">: o leitor de tela usa isso para escolher a voz', ref='WCAG 3.1.1'))
+    A.append(ach('acessibilidade', 'ok' if d.titulo else 'falha', 'titulo', 'título da página',
+                 dica='todo documento precisa de <title>', ref='WCAG 2.4.2'))
+    sem_alt = [i for i in d.imgs if 'alt' not in i]
+    A.append(ach('acessibilidade', 'falha' if sem_alt else 'ok', 'img-alt',
+                 pl(len(sem_alt), 'imagem', 'imagens') + ' sem texto alternativo' if sem_alt else 'imagens com texto alternativo',
+                 [f'<img src="{corta(i.get("src", ""), 40)}">' for i in sem_alt[:3]],
+                 'descreva a imagem em alt="…"; se for só decoração, use alt=""', 'WCAG 1.1.1'))
+    sem_nome_a = [x for x in d.ancoras if x['href'] is not None and not x['nome']]
+    A.append(ach('acessibilidade', 'falha' if sem_nome_a else 'ok', 'link-nome',
+                 pl(len(sem_nome_a), 'link') + ' sem nome' if sem_nome_a else 'links com nome',
+                 [f'<a href="{corta(x["href"] or "", 40)}">' for x in sem_nome_a[:3]],
+                 'link só com ícone precisa de aria-label="…" (ou alt na imagem dentro dele)', 'WCAG 2.4.4'))
+    sem_nome_b = [b for b in d.botoes if not b['nome']]
+    A.append(ach('acessibilidade', 'falha' if sem_nome_b else 'ok', 'botao-nome',
+                 pl(len(sem_nome_b), 'botão', 'botões') + ' sem nome' if sem_nome_b else 'botões com nome',
+                 [f'<button{" id=" + chr(34) + b["id"] + chr(34) if b["id"] else ""}{" class=" + chr(34) + corta(b["classe"], 24) + chr(34) if b["classe"] else ""}>' for b in sem_nome_b[:3]],
+                 'botão só com ícone precisa de aria-label="…"', 'WCAG 4.1.2'))
+    campos = [c for c in d.campos if (c.get('type') or 'text').lower() not in ('hidden', 'submit', 'button', 'reset', 'image')]
+    sem_rotulo, so_placeholder = [], []
+    for c in campos:
+        tem = c['_em_label'] or (c.get('id') and c['id'] in d.rotulos_for) or c.get('aria-label') or c.get('aria-labelledby') or c.get('title')
+        if not tem:
+            (so_placeholder if c.get('placeholder') else sem_rotulo).append(c)
+    A.append(ach('acessibilidade', 'falha' if sem_rotulo else 'aviso' if so_placeholder else 'ok', 'campo-rotulo',
+                 pl(len(sem_rotulo) + len(so_placeholder), 'campo') + ' sem rótulo' if sem_rotulo or so_placeholder else 'campos com rótulo',
+                 [f'<{c["_tag"]} name="{c.get("name", "")}"' + (f' placeholder="{corta(c["placeholder"], 20)}"' if c.get('placeholder') else '') + '>'
+                  for c in (sem_rotulo + so_placeholder)[:3]],
+                 'use <label for="id">; placeholder some quando a pessoa digita e não substitui o rótulo', 'WCAG 1.3.1 · 3.3.2'))
+    pessoais = [c for c in campos if not c.get('autocomplete') and ((c.get('type') or '').lower() in ('email', 'tel')
+                or re.search(r'e-?mail|^nome|name|telefone|phone|celular|cep|endere', c.get('name') or c.get('id') or '', re.I))]
+    if pessoais:
+        A.append(ach('acessibilidade', 'aviso', 'autocomplete', pl(len(pessoais), 'campo pessoal', 'campos pessoais') + ' sem autocomplete',
+                     [f'<input name="{c.get("name", "")}" type="{c.get("type", "text")}">' for c in pessoais[:3]],
+                     'autocomplete="email", "tel", "name"… deixa o navegador preencher; ajuda quem tem dificuldade motora ou cognitiva',
+                     'WCAG 1.3.5'))
+    h1 = [t for n, t in d.titulos if n == 1]
+    if not d.titulos:
+        A.append(ach('acessibilidade', 'falha', 'titulos', 'nenhum título (h1…h6) na página',
+                     dica='os títulos são o "sumário" de quem usa leitor de tela', ref='WCAG 1.3.1'))
+    else:
+        A.append(ach('acessibilidade', 'ok' if len(h1) == 1 else 'aviso', 'h1',
+                     'um h1 na página' if len(h1) == 1 else (f'{len(h1)} h1 na página' if h1 else 'a página não tem h1'),
+                     [corta(t, 50) for t in h1[:3]], 'deixe um único h1 com o assunto principal', 'WCAG 1.3.1'))
+        pulos, ant = [], 0
+        for n, t in d.titulos:
+            if ant and n > ant + 1:
+                pulos.append(f'h{ant} → h{n} ("{corta(t, 30)}")')
+            ant = n
+        A.append(ach('acessibilidade', 'aviso' if pulos else 'ok', 'ordem-titulos',
+                     'títulos pulam de nível' if pulos else 'títulos em ordem', pulos[:3],
+                     'não pule níveis: depois de h2 vem h3', 'WCAG 1.3.1'))
+    dup = [i for i, n in d.ids.items() if n > 1]
+    A.append(ach('acessibilidade', 'aviso' if dup else 'ok', 'ids', pl(len(dup), 'id repetido', 'ids repetidos') if dup else 'ids únicos',
+                 [f'id="{i}"' for i in dup[:3]], 'aria-labelledby e <label for> se perdem com id repetido', 'WCAG 4.1.2'))
+    A.append(ach('acessibilidade', 'aviso' if d.tabindex_pos else 'ok', 'tabindex',
+                 pl(d.tabindex_pos, 'elemento') + ' com tabindex positivo' if d.tabindex_pos else 'ordem do Tab natural',
+                 dica='tabindex maior que 0 bagunça a ordem do teclado; use 0 ou -1', ref='WCAG 2.4.3'))
+    sem_titulo = [f for f in d.iframes if not (f.get('title') or f.get('aria-label'))]
+    if d.iframes:
+        A.append(ach('acessibilidade', 'falha' if sem_titulo else 'ok', 'iframe', pl(len(sem_titulo), 'iframe') + ' sem título' if sem_titulo else 'iframes com título',
+                     [f'<iframe src="{corta(f.get("src", ""), 40)}">' for f in sem_titulo[:3]], 'dê title="…" ao iframe', 'WCAG 4.1.2'))
+    auto = [m for m in d.midias if 'autoplay' in m and 'muted' not in m]
+    if auto:
+        A.append(ach('acessibilidade', 'falha', 'autoplay', pl(len(auto), 'mídia tocando som sozinha', 'mídias tocando som sozinhas'),
+                     [f'<{m["_tag"]} src="{corta(m.get("src", ""), 40)}" autoplay>' for m in auto[:3]], dica='som automático atrapalha o leitor de tela: use muted ou tire o autoplay', ref='WCAG 1.4.2'))
+    vp = (d.meta('viewport') or '').lower().replace(' ', '')
+    bloqueia = 'user-scalable=no' in vp or 'user-scalable=0' in vp or re.search(r'maximum-scale=(1(\.0)?|0\.\d+)(,|$)', vp)
+    A.append(ach('acessibilidade', 'falha' if bloqueia else 'ok', 'zoom', 'zoom bloqueado no celular' if bloqueia else 'zoom liberado no celular',
+                 [vp] if bloqueia else [], 'tire user-scalable=no e maximum-scale do viewport', 'WCAG 1.4.4'))
+    A.append(ach('acessibilidade', 'ok' if 'main' in d.marcos else 'aviso', 'main',
+                 'região principal marcada (<main>)' if 'main' in d.marcos else 'sem <main>',
+                 dica='envolva o conteúdo principal em <main>: leitores de tela pulam direto para ele', ref='WCAG 1.3.1'))
+    primeiros = [a for a in d.ancoras[:5] if (a['href'] or '').startswith('#') and len(a['href']) > 1]
+    A.append(ach('acessibilidade', 'ok' if primeiros else 'info', 'pular', 'link "pular para o conteúdo"' if primeiros else 'sem link "pular para o conteúdo"',
+                 dica='um link no começo que leva ao <main> poupa dezenas de Tabs', ref='WCAG 2.4.1'))
+    genericos = [a for a in d.ancoras if GENERICOS.match((a['texto'] or '').strip())]
+    if genericos:
+        A.append(ach('acessibilidade', 'aviso', 'link-generico', pl(len(genericos), 'link') + ' com texto genérico',
+                     [f'"{a["texto"]}" → {corta(a["href"] or "", 30)}' for a in genericos[:3]],
+                     'fora de contexto, "clique aqui" não diz para onde vai; descreva o destino', 'WCAG 2.4.4'))
+    return A
+
+
+def checa_seo(d, bruto, url, robots, sitemap, renderizado):
+    S = []
+    t = (d.titulo or '').strip()
+    S.append(ach('seo', 'falha' if not t else 'aviso' if not 10 <= len(t) <= 65 else 'ok', 'seo-titulo',
+                 f'título: {len(t)} caracteres' if t else 'sem título', [corta(t, 60)] if t else [],
+                 'entre 10 e 65 caracteres aparece inteiro no Google'))
+    desc = d.meta('description') or ''
+    S.append(ach('seo', 'falha' if not desc else 'aviso' if not 50 <= len(desc) <= 165 else 'ok', 'descricao',
+                 f'descrição: {len(desc)} caracteres' if desc else 'sem meta description', [corta(desc, 60)] if desc else [],
+                 'entre 50 e 165 caracteres; é o texto embaixo do link no Google'))
+    robots_meta = (d.meta('robots') or '').lower()
+    noindex = 'noindex' in robots_meta
+    S.append(ach('seo', 'falha' if noindex else 'ok', 'noindex', 'a página pede para NÃO aparecer no Google (noindex)' if noindex
+                 else 'página indexável', [robots_meta] if noindex else [], 'tire o noindex se a página deve aparecer na busca'))
+    can = d.link_rel('canonical')
+    S.append(ach('seo', 'ok' if can else 'aviso', 'canonical', 'URL canônica definida' if can else 'sem link canonical',
+                 [can[0].get('href', '')] if can else [], '<link rel="canonical" href="…"> evita conteúdo duplicado'))
+    S.append(ach('seo', 'ok' if d.meta('viewport') else 'falha', 'viewport', 'viewport para celular' if d.meta('viewport') else 'sem meta viewport',
+                 dica='sem viewport o Google considera a página ruim no celular'))
+    if robots is not None:
+        if robots['bloqueia']:
+            S.append(ach('seo', 'falha', 'robots', 'robots.txt bloqueia o site inteiro', ['User-agent: * / Disallow: /'],
+                         'isso tira o site do Google; deixe só o que precisa esconder'))
+        else:
+            S.append(ach('seo', 'ok' if robots['existe'] else 'info', 'robots', 'robots.txt presente' if robots['existe'] else 'sem robots.txt',
+                         dica='não é obrigatório, mas é onde se aponta o sitemap'))
+    if sitemap is not None:
+        S.append(ach('seo', 'ok' if sitemap else 'info', 'sitemap', f'sitemap com {sitemap} URLs' if sitemap else 'sem sitemap.xml',
+                     dica='o sitemap ajuda o Google a achar todas as páginas'))
+    # prévia em redes sociais: o WhatsApp, o LinkedIn e o Facebook leem o HTML bruto, sem rodar JavaScript
+    og_falta = [k for k in ('og:title', 'og:description', 'og:image') if not bruto.meta(k)]
+    og_so_js = [k for k in og_falta if d.meta(k)]
+    S.append(ach('seo', 'falha' if og_so_js else 'aviso' if og_falta else 'ok', 'open-graph',
+                 ('Open Graph só aparece depois do JavaScript' if og_so_js else f'falta {", ".join(og_falta)}' if og_falta
+                  else 'prévia para redes sociais (Open Graph)'), [],
+                 'WhatsApp, LinkedIn e Facebook não rodam JavaScript: as tags og: precisam estar no HTML que o servidor manda'))
+    if renderizado and not (bruto.titulo or '').strip() and t:
+        S.append(ach('seo', 'aviso', 'titulo-js', 'o título só aparece depois do JavaScript',
+                     dica='coloque o <title> no index.html; robôs simples veem a página sem título'))
+    S.append(ach('seo', 'ok' if d.meta('twitter:card') or bruto.meta('twitter:card') else 'info', 'twitter',
+                 'cartão do X/Twitter' if d.meta('twitter:card') else 'sem twitter:card', dica='<meta name="twitter:card" content="summary_large_image">'))
+    icone = d.link_rel('icon') or d.link_rel('shortcut') or d.link_rel('apple-touch-icon')
+    S.append(ach('seo', 'ok' if icone else 'aviso', 'favicon', 'favicon definido' if icone else 'sem favicon no HTML',
+                 dica='<link rel="icon" href="/favicon.svg">'))
+    validos, quebrados = 0, 0
+    for bloco in d.jsonld:
+        try:
+            json.loads(bloco)
+            validos += 1
+        except ValueError:
+            quebrados += 1
+    S.append(ach('seo', 'falha' if quebrados else 'ok' if validos else 'info', 'jsonld',
+                 pl(quebrados, 'bloco') + ' JSON-LD com erro' if quebrados else pl(validos, 'bloco') + ' de dados estruturados' if validos
+                 else 'sem dados estruturados (JSON-LD)', dica='dados estruturados (schema.org) geram resultados ricos no Google'))
+    return S
+
+
+def checa_desempenho(pag, d, recursos):
+    P = []
+    ttfb = pag['ttfb']
+    P.append(ach('desempenho', 'falha' if ttfb > 1.8 else 'aviso' if ttfb > 0.8 else 'ok', 'ttfb',
+                 f'primeiro byte em {ttfb * 1000:.0f} ms', dica='acima de 800 ms: servidor lento, sem cache ou longe de quem acessa'))
+    enc = pag['cabecalhos'].get('content-encoding', '')
+    tam = len(pag['corpo'])
+    P.append(ach('desempenho', 'ok' if enc or tam < 2048 else 'aviso', 'compressao',
+                 f'HTML comprimido ({enc})' if enc else 'HTML sem compressão', [f'{humano(tam)} de HTML'],
+                 'ligue gzip ou brotli no servidor'))
+    versao = pag['http']
+    P.append(ach('desempenho', 'ok' if versao in ('2', '3') else 'info', 'http2', f'HTTP/{versao}' if versao else 'versão do HTTP desconhecida',
+                 dica='HTTP/2 baixa vários arquivos na mesma conexão'))
+    bloqueando = [s for s in d.scripts if s['_head'] and s.get('src') and 'async' not in s and 'defer' not in s
+                  and (s.get('type') or '').lower() != 'module']
+    P.append(ach('desempenho', 'aviso' if bloqueando else 'ok', 'scripts-bloqueantes',
+                 pl(len(bloqueando), 'script') + ' travando a renderização' if bloqueando else 'nenhum script travando a renderização',
+                 [corta(s['src'], 50) for s in bloqueando[:3]], 'use defer (ou type="module") nos scripts do <head>'))
+    sem_dim = [i for i in d.imgs if not (i.get('width') and i.get('height')) and 'aspect-ratio' not in (i.get('style') or '')]
+    P.append(ach('desempenho', 'aviso' if len(sem_dim) > 1 else 'ok', 'img-dimensoes',
+                 pl(len(sem_dim), 'imagem', 'imagens') + ' sem width/height' if sem_dim else 'imagens com dimensões',
+                 [corta(i.get('src', ''), 50) for i in sem_dim[:3]], 'sem dimensões a página "pula" enquanto carrega (CLS)'))
+    sem_lazy = [i for i in d.imgs[3:] if (i.get('loading') or '').lower() != 'lazy']
+    if len(d.imgs) > 3:
+        P.append(ach('desempenho', 'aviso' if len(sem_lazy) > 2 else 'ok', 'lazy',
+                     pl(len(sem_lazy), 'imagem', 'imagens') + ' abaixo da dobra sem loading="lazy"' if sem_lazy else 'imagens com carregamento preguiçoso',
+                     dica='loading="lazy" adia as imagens que ainda não estão na tela'))
+    pesados = sorted([r for r in recursos if r.get('tamanho')], key=lambda r: -r['tamanho'])
+    grandes = [r for r in pesados if r['tamanho'] > 300 * 1024]
+    if pesados:
+        P.append(ach('desempenho', 'aviso' if grandes else 'ok', 'pesados',
+                     pl(len(grandes), 'arquivo') + ' acima de 300 KB' if grandes else 'nenhum arquivo acima de 300 KB',
+                     [f'{humano(r["tamanho"])} {corta(r["url"].split("?")[0].rsplit("/", 1)[-1] or r["url"], 40)}' for r in (grandes or pesados)[:3]],
+                     'converta imagens para WebP/AVIF e divida JavaScript grande'))
+    legado = [r for r in recursos if re.search(r'\.(jpe?g|png|gif)(\?|$)', r['url'], re.I) and (r.get('tamanho') or 0) > 100 * 1024]
+    if legado:
+        P.append(ach('desempenho', 'aviso', 'formatos', pl(len(legado), 'imagem grande', 'imagens grandes') + ' em JPG/PNG/GIF',
+                     [corta(r['url'].rsplit('/', 1)[-1], 50) for r in legado[:3]], 'WebP e AVIF costumam ter metade do tamanho'))
+    estaticos = [r for r in recursos if r.get('cache') is not None and re.search(r'\.(js|css|woff2?|png|jpe?g|webp|avif|svg)(\?|$)', r['url'], re.I)]
+    curtos = [r for r in estaticos if r['cache'] < 86400]
+    if estaticos:
+        P.append(ach('desempenho', 'aviso' if len(curtos) > len(estaticos) / 2 else 'ok', 'cache',
+                     f'{len(curtos)} de {len(estaticos)} arquivos com cache curto' if curtos else 'arquivos com cache longo',
+                     [corta(r['url'].rsplit('/', 1)[-1], 50) for r in curtos[:3]], 'arquivos com hash no nome podem ter cache de 1 ano'))
+    return P
+
+
+RASTREADORES = [(r'google-analytics\.com|googletagmanager\.com|gtag/js', 'Google Analytics'), (r'connect\.facebook\.net', 'Meta Pixel'),
+                (r'hotjar\.com', 'Hotjar'), (r'clarity\.ms', 'Microsoft Clarity'), (r'doubleclick\.net|googlesyndication', 'Google Ads'),
+                (r'snap\.licdn\.com', 'LinkedIn Insight'), (r'analytics\.tiktok\.com', 'TikTok Pixel')]
+
+
+def checa_boas_praticas(d, html_bruto, final):
+    from urllib.parse import urlparse
+    B = []
+    host = urlparse(final).netloc
+    doctype = html_bruto.lstrip().lower().startswith('<!doctype html')
+    B.append(ach('boas-praticas', 'ok' if doctype else 'falha', 'doctype', '<!doctype html> presente' if doctype else 'sem <!doctype html>',
+                 dica='sem doctype o navegador entra no "modo quirks" e o CSS se comporta diferente'))
+    charset = re.search(r'<meta[^>]+charset', html_bruto[:2048], re.I)
+    B.append(ach('boas-praticas', 'ok' if charset else 'aviso', 'charset', 'codificação declarada no começo' if charset else 'sem <meta charset> no começo do HTML',
+                 dica='<meta charset="utf-8"> logo no início evita acentos quebrados'))
+    externos = [(s.get('src'), s) for s in d.scripts if s.get('src', '').startswith('http') and urlparse(s['src']).netloc != host]
+    externos += [(l.get('href'), l) for l in d.links if 'stylesheet' in (l.get('rel') or '') and (l.get('href') or '').startswith('http')
+                 and urlparse(l['href']).netloc != host]
+    sem_sri = [u for u, a in externos if not a.get('integrity') and not re.search(r'googletagmanager|google-analytics|fonts\.googleapis', u)]
+    if externos:
+        B.append(ach('boas-praticas', 'aviso' if sem_sri else 'ok', 'sri', pl(len(sem_sri), 'arquivo de outro site', 'arquivos de outro site') + ' sem integrity'
+                     if sem_sri else 'arquivos de CDN com integrity', [corta(u, 50) for u in sem_sri[:3]],
+                     'integrity="sha384-…" garante que a CDN não trocou o arquivo (Subresource Integrity)'))
+    for s in d.scripts:
+        m = re.search(r'jquery[.-]?(\d+)\.(\d+)', s.get('src') or '', re.I)
+        if m and (int(m.group(1)), int(m.group(2))) < (3, 5):
+            B.append(ach('boas-praticas', 'aviso', 'jquery', f'jQuery {m.group(1)}.{m.group(2)} tem falhas de segurança conhecidas',
+                         [corta(s['src'], 50)], 'atualize para o jQuery 3.5 ou mais novo (corrige falhas de XSS)'))
+            break
+    if d.elementos > 1500:
+        B.append(ach('boas-praticas', 'aviso', 'dom', f'{d.elementos} elementos no HTML', dica='acima de ~1.500 elementos a página fica pesada para montar e rolar'))
+    rastros = sorted({nome for rx, nome in RASTREADORES for s in d.scripts + d.iframes if re.search(rx, s.get('src') or '')}
+                     | {nome for rx, nome in RASTREADORES if re.search(rx, html_bruto)})
+    if rastros:
+        B.append(ach('boas-praticas', 'aviso', 'rastreadores', 'rastreadores: ' + ', '.join(rastros), [],
+                     'pela LGPD, avise sobre os cookies e peça consentimento antes de ativar esses scripts'))
+    terceiros = sorted({urlparse(u).netloc for u in [s.get('src') or '' for s in d.scripts] + [i.get('src') or '' for i in d.iframes]
+                        if u.startswith('http') and urlparse(u).netloc != host})
+    if len(terceiros) > 4:
+        B.append(ach('boas-praticas', 'aviso', 'terceiros', f'scripts de {len(terceiros)} domínios de terceiros', terceiros[:3],
+                     'cada domínio externo é mais uma conexão e mais um ponto que pode cair ou vazar dados'))
+    manifesto = d.link_rel('manifest')
+    B.append(ach('boas-praticas', 'ok' if manifesto else 'info', 'manifesto', 'manifesto de app (PWA)' if manifesto else 'sem manifesto de app (PWA)',
+                 dica='<link rel="manifest"> deixa instalar o site como app e define ícone e cor'))
+    if not d.meta('theme-color'):
+        B.append(ach('boas-praticas', 'info', 'theme-color', 'sem theme-color', dica='<meta name="theme-color" content="#303446"> pinta a barra do navegador no celular'))
+    return B
+
+
+def checa_seguranca(pag, d, url, tls):
+    G = []
+    https = url.startswith('https://')
+    h = pag['cabecalhos']
+    G.append(ach('seguranca', 'ok' if https else 'falha', 'https', 'HTTPS' if https else 'sem HTTPS', dica='todo site público deve usar HTTPS'))
+    if tls:
+        dias = tls.get('dias')
+        if dias is not None:
+            G.append(ach('seguranca', 'falha' if dias < 7 else 'aviso' if dias < 21 else 'ok', 'certificado',
+                         f'certificado vence em {dias} dias' if dias >= 0 else 'certificado VENCIDO', [tls.get('emissor', '')],
+                         'renove o certificado (Vercel, Netlify e GitHub Pages renovam sozinhos)'))
+    cabecalhos = [('strict-transport-security', 'HSTS', 'força HTTPS nas próximas visitas', 'aviso'),
+                  ('content-security-policy', 'CSP', 'limita de onde scripts podem vir (barra XSS)', 'aviso'),
+                  ('x-content-type-options', 'X-Content-Type-Options', 'impede o navegador de "adivinhar" o tipo do arquivo', 'aviso'),
+                  ('referrer-policy', 'Referrer-Policy', 'controla o que vaza no cabeçalho Referer', 'info'),
+                  ('permissions-policy', 'Permissions-Policy', 'desliga câmera, microfone etc. que o site não usa', 'info')]
+    for chave, nome, porque, nivel in cabecalhos:
+        if chave == 'strict-transport-security' and not https:
+            continue
+        G.append(ach('seguranca', 'ok' if chave in h else nivel, 'h-' + chave, f'{nome}' if chave in h else f'sem {nome}', dica=porque))
+    csp = h.get('content-security-policy', '')
+    if csp and re.search(r"'unsafe-(inline|eval)'", csp):
+        G.append(ach('seguranca', 'aviso', 'csp-fraca', "CSP com 'unsafe-inline' ou 'unsafe-eval'", [corta(csp, 50)],
+                     'essas palavras desligam boa parte da proteção contra XSS; prefira nonce ou hash'))
+    if h.get('access-control-allow-origin', '').strip() == '*':
+        G.append(ach('seguranca', 'info', 'cors', 'CORS liberado para qualquer site (*)', dica='se a página não é uma API pública, restrinja o Access-Control-Allow-Origin'))
+    anti_frame = 'x-frame-options' in h or 'frame-ancestors' in csp
+    G.append(ach('seguranca', 'ok' if anti_frame else 'aviso', 'frame', 'proteção contra clickjacking' if anti_frame else 'sem proteção contra clickjacking',
+                 dica='X-Frame-Options: DENY (ou frame-ancestors na CSP) impede que embutam o site num iframe'))
+    if https:
+        misto = [x for x in ([i.get('src', '') for i in d.imgs] + [s.get('src', '') for s in d.scripts] +
+                             [l.get('href', '') for l in d.links if 'stylesheet' in (l.get('rel') or '')] + [f.get('src', '') for f in d.iframes])
+                 if x.startswith('http://')]
+        G.append(ach('seguranca', 'falha' if misto else 'ok', 'misto', pl(len(misto), 'recurso') + ' por HTTP numa página HTTPS' if misto else 'sem conteúdo misto',
+                     [corta(x, 50) for x in misto[:3]], 'o navegador bloqueia ou avisa; troque por https://'))
+        ruins = [c.split('=', 1)[0] for c in pag['cookies'] if 'secure' not in c.lower() or 'httponly' not in c.lower()]
+        if pag['cookies']:
+            G.append(ach('seguranca', 'aviso' if ruins else 'ok', 'cookies', pl(len(ruins), 'cookie') + ' sem Secure/HttpOnly' if ruins else 'cookies protegidos',
+                         ruins[:3], 'Secure manda só por HTTPS; HttpOnly esconde do JavaScript (barra roubo de sessão)'))
+    servidor = h.get('server', '') + ' ' + h.get('x-powered-by', '')
+    if re.search(r'\d+\.\d+', servidor):
+        G.append(ach('seguranca', 'info', 'versao', 'o servidor anuncia a versão', [servidor.strip()],
+                     'esconder a versão dificulta quem procura falhas conhecidas'))
+    abre = [a for a in d.ancoras if (a['target'] or '') == '_blank' and 'noopener' not in a['rel'] and 'noreferrer' not in a['rel']
+            and (a['href'] or '').startswith('http')]
+    if abre:
+        G.append(ach('seguranca', 'info', 'noopener', pl(len(abre), 'link') + ' target="_blank" sem rel="noopener"',
+                     dica='navegadores novos já protegem, mas rel="noopener" cobre os antigos'))
+    return G
+
+
+def info_tls(host):
+    import socket
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=10) as s:
+            with ctx.wrap_socket(s, server_hostname=host) as ss:
+                cert = ss.getpeercert()
+        fim = ssl.cert_time_to_seconds(cert['notAfter'])
+        emissor = dict(x[0] for x in cert.get('issuer', ())).get('organizationName', '')
+        return {'dias': int((fim - time.time()) // 86400), 'emissor': emissor}
+    except Exception:
+        # Python sem certificados raiz (comum no macOS): tenta pelo curl, que usa os do sistema
+        try:
+            r = subprocess.run(['curl', '-sS', '-v', '-o', os.devnull, '--max-time', '15', f'https://{host}/'],
+                               capture_output=True, timeout=25)
+            m = re.search(r'expire date: (.+)', r.stderr.decode('utf-8', 'replace'))
+            if m:
+                fim = datetime.strptime(' '.join(m.group(1).split()), '%b %d %H:%M:%S %Y %Z').timestamp()
+                return {'dias': int((fim - time.time()) // 86400), 'emissor': ''}
+        except Exception:
+            pass
+    return None
+
+
+def info_robots(origem):
+    r = busca(origem + '/robots.txt', tempo=12)
+    if r['status'] != 200 or b'<html' in r['corpo'][:500].lower():
+        return {'existe': False, 'bloqueia': False, 'sitemaps': []}, []
+    txt = r['corpo'].decode('utf-8', 'replace')
+    bloqueia, agente = False, None
+    for l in txt.splitlines():
+        l = l.split('#')[0].strip()
+        if l.lower().startswith('user-agent:'):
+            agente = l.split(':', 1)[1].strip()
+        elif l.lower().startswith('disallow:') and agente == '*' and l.split(':', 1)[1].strip() == '/':
+            bloqueia = True
+    sitemaps = [l.split(':', 1)[1].strip() for l in txt.splitlines() if l.lower().startswith('sitemap:')]
+    return {'existe': True, 'bloqueia': bloqueia, 'sitemaps': sitemaps}, sitemaps
+
+
+def le_sitemap(origem, sitemaps):
+    for alvo in (sitemaps or []) + [origem + '/sitemap.xml']:
+        r = busca(alvo, tempo=15)
+        if r['status'] == 200 and b'<loc>' in r['corpo']:
+            return re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', r['corpo'].decode('utf-8', 'replace'))
+    return []
+
+
+def checa_recursos(urls, limite=60):
+    # HEAD em cada link e arquivo da página: quebrados, tamanho e cache, em paralelo
+    alvos = list(dict.fromkeys(urls))[:limite]
+
+    def um(u):
+        r = busca(u, metodo='HEAD', tempo=12, corpo=False)
+        if r['status'] in (403, 405, 501) or (r['status'] == 0 and not r['erro']):
+            r = busca(u, tempo=15)
+            if r['corpo']:
+                r['cabecalhos'].setdefault('content-length', str(len(r['corpo'])))
+        cc = r['cabecalhos'].get('cache-control', '')
+        m = re.search(r'max-age=(\d+)', cc)
+        cache = int(m.group(1)) if m else (0 if 'no-cache' in cc or 'no-store' in cc else None)
+        tam = r['cabecalhos'].get('content-length', '')
+        return {'url': u, 'status': r['status'], 'erro': r['erro'], 'tamanho': int(tam) if tam.isdigit() else None, 'cache': cache}
+
+    with ThreadPoolExecutor(10) as ex:
+        return list(ex.map(um, alvos))
+
+
+def absoluto(base, href):
+    from urllib.parse import urljoin
+    if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:', 'data:')):
+        return None
+    u = urljoin(base, href.strip())
+    return u.split('#')[0] if u.startswith(('http://', 'https://')) else None
+
+
+def detecta_stack(html, cab):
+    tec = []
+    sinais = [(r'/@vite/client|type="module"[^>]+src="/assets/index-[\w-]+\.js', 'Vite'), (r'__NEXT_DATA__|/_next/static', 'Next.js'),
+              (r'__nuxt|/_nuxt/', 'Nuxt'), (r'ng-version=', 'Angular'), (r'data-reactroot|react-dom|id="root"', 'React'),
+              (r'data-v-[0-9a-f]{8}|id="app"', 'Vue'), (r'svelte-[a-z0-9]{6}', 'Svelte'), (r'astro-island|data-astro', 'Astro'),
+              (r'wp-content|wp-includes', 'WordPress'), (r'cdn\.tailwindcss|class="[^"]*\b(flex|grid) [^"]*\b(px|py|mt|mb)-\d', 'Tailwind'),
+              (r'bootstrap(\.min)?\.(css|js)', 'Bootstrap')]
+    for rx, nome in sinais:
+        if re.search(rx, html, re.I) and nome not in tec:
+            tec.append(nome)
+    if 'Next.js' in tec and 'React' not in tec:
+        tec.append('React')
+    servidor = (cab.get('server', '') + ' ' + cab.get('x-powered-by', '')).lower()
+    host = None
+    if 'x-vercel-id' in cab or 'vercel' in servidor:
+        host = 'Vercel'
+    elif 'x-nf-request-id' in cab or 'netlify' in servidor:
+        host = 'Netlify'
+    elif 'github.com' in servidor or 'x-github-request-id' in cab:
+        host = 'GitHub Pages'
+    elif 'cf-ray' in cab or 'cloudflare' in servidor:
+        host = 'Cloudflare'
+    elif 'x-render-origin-server' in cab or 'render' in servidor:
+        host = 'Render'
+    return tec, host
+
+
+def nota_de(achados):
+    validos = [a for a in achados if a['nivel'] in PESO_NIVEL]
+    if not validos:
+        return None
+    return round(100 * sum(PESO_NIVEL[a['nivel']] for a in validos) / (3 * len(validos)))
+
+
+def analisa_pagina(t, url, args, nav, pr=None, completo=True):
+    from urllib.parse import urlparse
+    pag = busca(url)
+    if pag['erro'] or not pag['status']:
+        return {'url': url, 'erro': pag['erro'] or 'sem resposta'}
+    final = pag['url_final']
+    u = urlparse(final)
+    origem = f'{u.scheme}://{u.netloc}'
+    local = u.hostname in ('localhost', '127.0.0.1', '::1') or (u.hostname or '').endswith('.local')
+    html_bruto = pag['corpo'].decode('utf-8', 'replace')
+    bruto = LeitorHTML(html_bruto)
+    modulos = any((s.get('type') or '').lower() == 'module' for s in bruto.scripts)
+    raiz_vazia = re.search(r'<div[^>]+id=["\'](root|app|__next|__nuxt|svelte)["\'][^>]*>\s*</div>', html_bruto, re.I)
+    spa = bool(raiz_vazia) or (len(bruto.texto) < 40 and modulos and not bruto.titulos)
+    d, renderizado, dom = bruto, False, ''
+    if spa and nav:
+        if pr:
+            pr.atual = 'renderizando com o navegador (site com JavaScript)'
+        dom = dom_renderizado(nav, final)
+        if dom:
+            d, renderizado = LeitorHTML(dom), True
+    achados = checa_acessibilidade(d)
+    recursos_urls = ([absoluto(final, i.get('src')) for i in d.imgs] + [absoluto(final, s.get('src')) for s in d.scripts]
+                     + [absoluto(final, l.get('href')) for l in d.links if (l.get('rel') or '').lower() in ('stylesheet', 'preload', 'icon')])
+    links_urls = [absoluto(final, a['href']) for a in d.ancoras]
+    robots = sitemap = None
+    urls_sitemap = []
+    if completo:
+        if pr:
+            pr.atual = 'robots.txt e sitemap'
+        robots, sms = info_robots(origem)
+        urls_sitemap = le_sitemap(origem, sms)
+        sitemap = len(urls_sitemap)
+    achados += checa_seo(d, bruto, final, robots, sitemap, renderizado)
+    achados += checa_boas_praticas(d, html_bruto, final)
+    recursos, links = [], []
+    if completo:
+        if pr:
+            pr.atual = 'conferindo arquivos e links da página'
+        verif = checa_recursos([x for x in recursos_urls + links_urls if x])
+        por_url = {v['url']: v for v in verif}
+        recursos = [por_url[x] for x in dict.fromkeys(recursos_urls) if x in por_url]
+        links = [por_url[x] for x in dict.fromkeys(links_urls) if x in por_url]
+    achados += checa_desempenho(pag, d, recursos)
+    if not local:
+        tls = info_tls(u.hostname) if final.startswith('https://') and completo else None
+        achados += checa_seguranca(pag, d, final, tls)
+        if completo:
+            st = busca(origem + '/.well-known/security.txt', tempo=10, corpo=False)
+            achados.append(ach('seguranca', 'ok' if st['status'] == 200 else 'info', 'security-txt',
+                               'security.txt presente' if st['status'] == 200 else 'sem /.well-known/security.txt',
+                               dica='diz para quem achar uma falha como avisar você (padrão RFC 9116)'))
+        # quem chega por http:// precisa ser mandado para https://
+        if completo and final.startswith('https://'):
+            r = busca('http://' + u.netloc + (u.path or '/'), tempo=12, corpo=False)
+            vai = r['url_final'].startswith('https://')
+            achados.append(ach('seguranca', 'ok' if vai else 'falha', 'redireciona-https',
+                               'http:// redireciona para https://' if vai else 'http:// não redireciona para https://',
+                               dica='quem digita o endereço sem https fica na versão insegura'))
+    if completo:
+        quebrados = [l for l in links + recursos if l['erro'] or l['status'] >= 400]
+        achados.append(ach('links', 'falha' if quebrados else 'ok', 'quebrados',
+                           pl(len(quebrados), 'link ou arquivo quebrado', 'links ou arquivos quebrados') if quebrados else f'{len(links) + len(recursos)} links e arquivos funcionando',
+                           [f'{l["status"] or l["erro"]} {corta(l["url"], 46)}' for l in quebrados[:4]], 'corrija ou remova os links que levam a erro'))
+        redir = len(pag['cadeia']) - 1
+        if redir > 1:
+            achados.append(ach('links', 'aviso', 'cadeia', f'{redir} redirecionamentos até a página',
+                               [f'{s} → {corta(loc, 40)}' for s, loc in pag['cadeia'][:-1]], 'cada redirecionamento custa uma ida e volta ao servidor'))
+    internos = [x for x in dict.fromkeys(links_urls + urls_sitemap) if x and urlparse(x).netloc == u.netloc
+                and x.rstrip('/') != final.rstrip('/') and not re.search(r'\.(pdf|zip|png|jpe?g|svg|xml)(\?|$)', x, re.I)]
+    tec, hospedagem = detecta_stack(html_bruto + (dom if renderizado else ''), pag['cabecalhos'])
+    return {'url': url, 'final': final, 'status': pag['status'], 'ttfb': pag['ttfb'], 'total': pag['total'], 'http': pag['http'],
+            'compressao': pag['cabecalhos'].get('content-encoding', ''), 'html': len(pag['corpo']), 'spa': spa,
+            'renderizado': renderizado, 'local': local, 'achados': achados, 'internos': internos, 'tec': tec,
+            'hospedagem': hospedagem, 'bytes': len(pag['corpo']) + sum(r.get('tamanho') or 0 for r in recursos)}
+
+
+def le_lighthouse(dados):
+    cats = {}
+    for cid, c in dados.get('categories', {}).items():
+        if c.get('score') is not None:
+            cats[{'performance': 'desempenho', 'accessibility': 'acessibilidade', 'best-practices': 'boas-praticas', 'seo': 'seo'}.get(cid, cid)] = round(c['score'] * 100)
+    audits = dados.get('audits', {})
+    limites = {'first-contentful-paint': ('FCP', 1800, 3000), 'largest-contentful-paint': ('LCP', 2500, 4000),
+               'total-blocking-time': ('TBT', 200, 600), 'cumulative-layout-shift': ('CLS', 0.1, 0.25), 'speed-index': ('SI', 3400, 5800)}
+    metricas = []
+    for chave, (sigla, bom, medio) in limites.items():
+        a = audits.get(chave)
+        if a and a.get('numericValue') is not None:
+            v = a['numericValue']
+            metricas.append({'sigla': sigla, 'titulo': a.get('title', sigla), 'valor': a.get('displayValue', ''),
+                             'nivel': 'ok' if v <= bom else 'aviso' if v <= medio else 'falha'})
+    oportunidades = []
+    for a in audits.values():
+        det = a.get('details') or {}
+        if det.get('type') == 'opportunity' and (a.get('score') or 0) < 0.9 and (det.get('overallSavingsMs') or 0) > 50:
+            oportunidades.append({'titulo': a.get('title', ''), 'ganho': det.get('overallSavingsMs', 0), 'valor': a.get('displayValue', '')})
+    oportunidades.sort(key=lambda o: -o['ganho'])
+    falhas = {}
+    mapa = {'performance': 'desempenho', 'accessibility': 'acessibilidade', 'best-practices': 'boas-praticas', 'seo': 'seo'}
+    for cid, c in dados.get('categories', {}).items():
+        for ref in c.get('auditRefs', []):
+            a = audits.get(ref.get('id'), {})
+            if ref.get('weight', 0) > 0 and a.get('score') is not None and a['score'] < 0.9 and \
+                    a.get('scoreDisplayMode') not in ('notApplicable', 'informative', 'manual') and cid != 'performance':
+                itens = len(((a.get('details') or {}).get('items')) or [])
+                falhas.setdefault(mapa.get(cid, cid), []).append({'titulo': a.get('title', ''), 'itens': itens})
+    peso = (audits.get('total-byte-weight') or {}).get('numericValue')
+    return {'notas': cats, 'metricas': metricas, 'oportunidades': oportunidades[:5], 'falhas': falhas, 'bytes': peso}
+
+
+IDS_HEAD = {'lang', 'titulo', 'seo-titulo', 'descricao', 'canonical', 'viewport', 'open-graph', 'twitter', 'favicon', 'titulo-js',
+            'jsonld', 'charset', 'doctype', 'manifesto', 'theme-color', 'zoom', 'noindex', 'scripts-bloqueantes'}
+IDS_SERVIDOR = {'h-strict-transport-security', 'h-content-security-policy', 'h-x-content-type-options', 'h-referrer-policy',
+                'h-permissions-policy', 'frame', 'csp-fraca', 'cors', 'compressao', 'http2', 'cache', 'versao', 'redireciona-https',
+                'ttfb', 'cookies'}
+
+
+def onde_mexer(a, res):
+    tec, host = res.get('tec') or [], res.get('hospedagem')
+    if a['id'] == 'doctype':
+        return 'na primeira linha de cada HTML (index.html ou o template base)'
+    if a['id'] == 'lang' and 'Next.js' not in tec:
+        return 'na tag `<html>` do index.html (ou do layout/template base)'
+    if a['id'] in IDS_HEAD:
+        if 'Next.js' in tec:
+            return 'no `export const metadata` (app/layout.tsx ou app/page.tsx), ou no next/head nas páginas antigas'
+        if res.get('spa'):
+            return 'no `index.html` da raiz do projeto: tem que estar no HTML estático, não ser injetado pelo JavaScript'
+        return 'no `<head>` do HTML (index.html ou o layout/template comum das páginas)'
+    if a['id'] in IDS_SERVIDOR:
+        if host == 'Vercel':
+            return 'no `vercel.json`, na chave `"headers"` (ou redirects/rewrites)'
+        if host == 'Netlify':
+            return 'no arquivo `_headers` (pasta pública) ou no `netlify.toml`'
+        if host == 'GitHub Pages':
+            return 'o GitHub Pages não deixa configurar cabeçalhos: só resolve com Cloudflare na frente ou mudando para Vercel/Netlify (não é correção de código)'
+        return 'na configuração do servidor ou da hospedagem (cabeçalhos HTTP)'
+    if a['id'] in ('robots', 'sitemap', 'security-txt'):
+        return 'na pasta pública do projeto (`public/` em Vite/Next, ou a raiz do site)'
+    if a['id'] == 'quebrados':
+        return 'procure os endereços citados no código (busca no projeto pelo trecho do link)'
+    if a['cat'] in ('acessibilidade', 'desempenho', 'boas-praticas'):
+        return 'nos componentes/templates que renderizam os trechos citados (busque pelo src, class, name ou texto)'
+    return 'procure pelos trechos citados no código do projeto'
+
+
+def md(txt):
+    # trecho de HTML no meio do texto vira código, senão o Markdown o trata como tag e ele some
+    return re.sub(r'(<[^<>]+>)', r'`\1`', txt)
+
+
+def gera_resumo_ia(res, notas, lh, extras, fontes):
+    prio = {'falha': 'ALTA', 'aviso': 'MÉDIA', 'info': 'BAIXA (opcional)'}
+    rotulos = dict(CATEGORIAS)
+    L = [f'# Raio-x de {res["final"]}: correções', '',
+         f'> Gerado pelo ferramentas-git em {datetime.now():%d/%m/%Y %H:%M}. Notas: '
+         + ' · '.join(f'{rotulos[c]} {notas[c]}' for c, _ in CATEGORIAS if notas.get(c) is not None), '',
+         '## Contexto', '', f'- Endereço analisado: {res["final"]}']
+    if res.get('tec') or res.get('hospedagem'):
+        L.append(f'- Tecnologia detectada: {", ".join(res.get("tec") or ["não identificada"])}'
+                 + (f' · hospedagem: {res["hospedagem"]}' if res.get('hospedagem') else ''))
+    if res.get('spa'):
+        L.append('- O servidor manda um HTML quase vazio e o conteúdo é montado pelo JavaScript (SPA). '
+                 'Título, descrição e tags og: precisam estar no `index.html`, senão robôs e redes sociais não veem.')
+    L += ['', '## O que fazer', '',
+          'Você está no código deste site. Corrija os problemas abaixo, na ordem (do mais grave para o menos grave):', '',
+          '1. Para cada item, encontre no código os trechos citados em "Encontrado", aplique a correção e passe ao próximo.',
+          '2. Não mude o visual nem o comportamento além do necessário para cada correção.',
+          '3. Itens de prioridade BAIXA são opcionais: faça só se forem simples.',
+          '4. Se um item depender de configuração fora do código (hospedagem, DNS), não invente: liste-o no fim como pendente.',
+          '5. No final, resuma o que mudou, arquivo por arquivo.', '', '## Problemas', '']
+    ordem = sorted([a for a in res['achados'] if a['nivel'] in prio and not (a['id'] == 'carbono' and a['nivel'] == 'info')], key=lambda a: (['falha', 'aviso', 'info'].index(a['nivel']),
+                                                                                    [c for c, _ in CATEGORIAS].index(a['cat'])))
+    if not ordem:
+        L.append('Nenhum problema encontrado pela análise própria.')
+    for i, a in enumerate(ordem, 1):
+        L.append(f'### {i}. [{prio[a["nivel"]]}] {rotulos[a["cat"]]}: {md(a["titulo"])}' + (f' ({a["ref"]})' if a['ref'] else ''))
+        if a['exemplos']:
+            L.append('- **Encontrado:** ' + '; '.join(f'`{x}`' for x in a['exemplos']))
+        L.append(f'- **Onde mexer:** {onde_mexer(a, res)}')
+        if a['dica']:
+            L.append(f'- **Correção:** {md(a["dica"])}')
+        L.append('')
+    if lh:
+        L += ['## Lighthouse', '']
+        if lh['oportunidades']:
+            L.append('**O que mais acelera a página:**')
+            L += [f'- {o["titulo"]} (economia estimada: {o["ganho"] / 1000:.1f} s)'.replace('.', ',') for o in lh['oportunidades']]
+            L.append('')
+        for cid, falhas in lh['falhas'].items():
+            if falhas:
+                L.append(f'**{rotulos.get(cid, cid)}, falhas apontadas pelo Lighthouse:**')
+                L += [f'- {f["titulo"]}' + (f' ({pl(f["itens"], "elemento")})' if f['itens'] else '') for f in falhas]
+                L.append('')
+        ruins = [m for m in lh['metricas'] if m['nivel'] != 'ok']
+        if ruins:
+            L.append('**Core Web Vitals fora do ideal:** ' + ', '.join(f'{m["sigla"]} {m["valor"]}' for m in ruins))
+            L.append('')
+    paginas = [e for e in extras if not e.get('erro') and e.get('status', 200) < 400 and any(a['nivel'] == 'falha' for a in e['achados'])]
+    fora = [e for e in extras if e.get('erro') or e.get('status', 200) >= 400]
+    if fora:
+        L += ['## Páginas internas com erro', ''] + [f'- {e.get("final") or e["url"]}: {e.get("erro") or "HTTP " + str(e["status"])}' for e in fora] + ['']
+    if paginas:
+        L += ['## Outras páginas com falhas', '']
+        for e in paginas:
+            L.append(f'- {e["final"]}: ' + '; '.join(a['titulo'] for a in e['achados'] if a['nivel'] == 'falha'))
+        L.append('')
+    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas-git.py raiox {res["final"]}`',
+          '- [ ] Nenhum item de prioridade ALTA restante', '- [ ] As notas não caíram em nenhuma categoria', '']
+    return '\n'.join(L)
+
+
+def copia_area_transferencia(texto):
+    if os.name == 'nt':
+        cmds = [(['clip'], texto.encode('utf-16le') if texto.startswith('\ufeff') else ('\ufeff' + texto).encode('utf-16le'))]
+    elif sys.platform == 'darwin':
+        cmds = [(['pbcopy'], texto.encode('utf-8'))]
+    else:
+        cmds = [(['wl-copy'], texto.encode()), (['xclip', '-selection', 'clipboard'], texto.encode()), (['xsel', '-b', '-i'], texto.encode())]
+    for cmd, dados in cmds:
+        if shutil.which(cmd[0]):
+            try:
+                if subprocess.run(cmd, input=dados, timeout=10).returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return False
+
+
+def barra_nota(t, nota, larg):
+    cor = 'verde' if nota >= 90 else 'amarelo' if nota >= 50 else 'vermelho'
+    cheio = round(larg * nota / 100)
+    vazio = '■' if t.cor else ('-' if t.nivel == 'ascii' else '·')
+    return t.p(('#' if t.nivel == 'ascii' else '■') * cheio, cor) + t.p(vazio * (larg - cheio), 'fundo')
+
+
+def _arquivo_historico(url):
+    import hashlib
+    chave = re.sub(r'^https?://', '', url.rstrip('/').lower())
+    return CASA / 'raiox' / (hashlib.sha1(chave.encode()).hexdigest()[:16] + '.json')
+
+
+def entrega_resumo_ia(t, args, resumo, nome):
+    pasta = CASA / 'relatorios'
+    pasta.mkdir(parents=True, exist_ok=True)
+    arq_ia = pasta / f'{nome}-ia-{datetime.now():%Y-%m-%d_%H%M%S}.md'
+    arq_ia.write_text(resumo, encoding='utf-8')
+    t.escreve()
+    t.titulo('resumo para a IA corrigir')
+    t.nota(f'    {caminho_curto(arq_ia, t.largura - 6)}', 0)
+    copiar = args.copiar
+    if not copiar and t.interativo and not args.sim:
+        copiar = t.pergunta('copiar para a área de transferência? s = sim').strip().lower() in ('s', 'sim')
+    if copiar:
+        if copia_area_transferencia(resumo):
+            t.ok('copiado: cole no Claude Code (ou outra IA) aberto na pasta do projeto.')
+        else:
+            t.aviso('não achei como copiar neste sistema; abra o arquivo acima.')
+    else:
+        t.paragrafo('No Claude Code aberto na pasta do projeto, peça: "leia esse arquivo e corrija os problemas".', 4, 'apagado')
+
+
+def ferramenta_raiox(t, args):
+    from urllib.parse import urlparse
+    url = args.url.strip()
+    if not re.match(r'https?://', url):
+        url = ('http://' if re.match(r'(localhost|127\.0\.0\.1)', url) else 'https://') + url
+    nav = acha_navegador()
+    t.prompt('raiox', url)
+    with Progresso(t, None, 'analisando') as pr:
+        pr.atual = 'baixando a página'
+        res = analisa_pagina(t, url, args, nav, pr)
+        lh, lh_erro = None, None
+        if not res.get('erro') and not args.rapido:
+            pr.atual = 'rodando o Lighthouse (pode levar 1 minuto)'
+            dados, lh_erro = roda_lighthouse(res['final'], nav, args.desktop)
+            lh = le_lighthouse(dados) if dados else None
+        extras = []
+        if not res.get('erro') and args.paginas:
+            for u in res['internos'][:args.paginas]:
+                pr.atual = caminho_curto(u)
+                extras.append(analisa_pagina(t, u, args, nav, completo=False))
+    if res.get('erro'):
+        t.erro(f'Não consegui abrir {url}: {res["erro"]}.')
+        return 1
+
+    achados = res['achados']
+    peso = (lh or {}).get('bytes') or res['bytes']
+    if peso:
+        # modelo Sustainable Web Design (v3): 0,81 kWh por GB transferido, 442 g de CO2 por kWh (média mundial)
+        co2 = peso / 1024 ** 3 * 0.81 * 442
+        achados.append(ach('desempenho', 'info' if co2 < 0.8 else 'aviso', 'carbono',
+                           (f'~{co2:.2f} g' if co2 >= 0.01 else 'menos de 0,01 g').replace('.', ',') + f' de CO₂ por visita ({humano(peso)})',
+                           dica='estimativa pelo peso transferido (modelo Sustainable Web Design); a mediana da web é ~0,8 g'))
+    estaticas = {cid: nota_de([a for a in achados if a['cat'] == cid]) for cid, _ in CATEGORIAS}
+    notas, fontes = dict(estaticas), {c: 'propria' for c in estaticas}
+    if lh:
+        notas.update(lh['notas'])
+        fontes.update({c: 'lighthouse' for c in lh['notas']})
+    linha = [t.p(str(res['status']), 'verde' if res['status'] < 400 else 'vermelho'), t.p(f'{res["total"]:.1f} s'.replace('.', ','), 'texto'),
+             t.p(f'HTTP/{res["http"]}', 'sub')]
+    if res['compressao']:
+        linha.append(t.p(res['compressao'], 'sub'))
+    linha.append(t.p(f'{humano(res["html"])} de HTML', 'sub'))
+    if res.get('tec') or res.get('hospedagem'):
+        linha.append(t.p(' + '.join(res.get('tec') or []) + (f' na {res["hospedagem"]}' if res.get('hospedagem') else ''), 'roxo'))
+    if res['spa']:
+        linha.append(t.p('SPA' + (' (renderizada)' if res['renderizado'] else ''), 'roxo'))
+    if res['final'].rstrip('/') != url.rstrip('/'):
+        t.nota(f'  → {corta(res["final"], t.largura - 6)}', 2)
+    t.partes(linha)
+    if res['spa'] and not res['renderizado']:
+        t.paragrafo('O HTML vem quase vazio (React/Vite?) e não achei Chrome, Edge ou Brave para renderizar: '
+                    'a análise de acessibilidade e SEO vê só a casca.', 4, 'amarelo')
+
+    # notas, com a comparação com a última vez
+    hist_arq = _arquivo_historico(res['final'])
+    anterior = None
+    try:
+        anterior = json.loads(hist_arq.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        pass
+    t.escreve()
+    t.titulo('notas' + (' (Lighthouse + análise própria)' if lh else ' (análise própria)'))
+    larg = max(6, min(20, t.largura - 34))
+    for cid, rotulo in CATEGORIAS:
+        n = notas.get(cid)
+        if n is None:
+            continue
+        cor = 'verde' if n >= 90 else 'amarelo' if n >= 50 else 'vermelho'
+        delta = ''
+        if anterior and cid in anterior.get('notas', {}) and anterior.get('fontes', {}).get(cid) == fontes.get(cid):
+            dif = n - anterior['notas'][cid]
+            if dif:
+                delta = t.p(f' {"↑" if dif > 0 else "↓"}{abs(dif)}', 'verde' if dif > 0 else 'vermelho')
+        fonte = '' if (lh and cid in lh['notas']) or not lh else t.p(' ·', 'apagado')
+        t.escreve(f'    {t.p(f"{rotulo:<15}", "texto")}{barra_nota(t, n, larg)} {t.p(f"{n:>3}", cor, True)}{delta}{fonte}')
+    if lh and any(fontes.get(c) == 'propria' and notas.get(c) is not None for c, _ in CATEGORIAS):
+        t.paragrafo('· = nota só da análise própria (o Lighthouse não avalia)', 4, 'apagado')
+    if lh_erro and not args.rapido:
+        t.paragrafo(f'Lighthouse: {lh_erro}', 4, 'apagado')
+    if anterior:
+        quando = ha_quanto_iso(anterior.get('quando'))
+        antes = set(anterior.get('problemas', []))
+        agora = {a['id'] for a in achados if a['nivel'] in ('falha', 'aviso')}
+        resolvidos, novos = antes - agora, agora - antes
+        t.paragrafo(f'desde a última vez ({quando}): {pl(len(resolvidos), "problema resolvido", "problemas resolvidos")}, '
+                    f'{pl(len(novos), "novo")}', 4, 'apagado')
+
+    if lh and lh['metricas']:
+        t.escreve()
+        t.titulo('Core Web Vitals (celular)' if not args.desktop else 'Core Web Vitals (computador)')
+        estilo = {'ok': ('●', 'verde'), 'aviso': ('●', 'amarelo'), 'falha': ('●', 'vermelho')}
+        for m in lh['metricas']:
+            ic, cor = estilo[m['nivel']]
+            t.item(ic, cor, f'{m["sigla"]:<4} {m["titulo"]}', t.p(m['valor'], cor), recuo=4)
+        if lh['oportunidades']:
+            t.escreve()
+            t.titulo('o que mais acelera')
+            for o in lh['oportunidades']:
+                t.item('↳', 'azul', o['titulo'], t.p(f'-{o["ganho"] / 1000:.1f} s'.replace('.', ','), 'verde'), recuo=4)
+
+    # problemas por categoria
+    estilo = {'falha': ('✗', 'vermelho'), 'aviso': ('!', 'amarelo'), 'info': ('·', 'azul'), 'ok': ('✓', 'verde')}
+    rel = Relatorio('raiox')
+    rel.add(f'URL: {res["final"]}', f'status {res["status"]} · {res["total"]:.2f} s · HTTP/{res["http"]}', '')
+    rel.add('Notas: ' + ', '.join(f'{r} {notas[c]}' for c, r in CATEGORIAS if notas.get(c) is not None), '')
+    for cid, rotulo in CATEGORIAS:
+        da_cat = [a for a in achados if a['cat'] == cid]
+        lh_falhas = (lh or {}).get('falhas', {}).get(cid, []) if lh else []
+        if not da_cat and not lh_falhas:
+            continue
+        problemas = [a for a in da_cat if a['nivel'] in ('falha', 'aviso', 'info')]
+        ordem = sorted(problemas, key=lambda a: ['falha', 'aviso', 'info'].index(a['nivel']))
+        oks = [a for a in da_cat if a['nivel'] == 'ok']
+        n_prob = sum(1 for a in problemas if a['nivel'] != 'info') or len(lh_falhas)
+        t.escreve()
+        t.titulo(f'{rotulo} · ' + (f'{n_prob} problema{"s" if n_prob != 1 else ""}' if n_prob else 'tudo certo'))
+        for a in ordem:
+            if a['nivel'] == 'info' and not args.tudo:
+                continue
+            ic, cor = estilo[a['nivel']]
+            t.escreve('    ' + t.p(ic, cor, True) + ' ' + t.p(corta(a['titulo'], t.largura - 7), 'texto'))
+            for ex in a['exemplos'][:3]:
+                t.nota(corta(ex, t.largura - 9), 8)
+            if a['dica'] and a['nivel'] != 'ok':
+                for l in textwrap.wrap(a['dica'] + (f' ({a["ref"]})' if a['ref'] else ''), t.largura - 8):
+                    t.escreve(' ' * 6 + t.p(l, 'apagado'))
+        for f in lh_falhas[:6]:
+            t.escreve('    ' + t.p('✗', 'vermelho', True) + ' ' + t.p(corta(f['titulo'], t.largura - 16), 'texto')
+                      + (t.p(f' ({f["itens"]})', 'apagado') if f['itens'] else ''))
+        infos = sum(1 for a in problemas if a['nivel'] == 'info')
+        resto = []
+        if oks:
+            resto.append(f'{len(oks)} ok')
+        if infos and not args.tudo:
+            resto.append(f'{infos} sugest{"ões" if infos > 1 else "ão"}')
+        if resto and not args.tudo:
+            t.paragrafo(' · '.join(resto) + ' (veja tudo com --tudo)', 4, 'apagado')
+        if args.tudo:
+            for a in oks:
+                t.escreve('    ' + t.p('✓', 'verde') + ' ' + t.p(corta(a['titulo'], t.largura - 7), 'sub'))
+        for a in da_cat:
+            rel.add(f'[{a["nivel"].upper()}] {rotulo}: {a["titulo"]}' + (f' — {"; ".join(a["exemplos"])}' if a['exemplos'] else '')
+                    + (f' — {a["dica"]}' if a['dica'] and a['nivel'] != 'ok' else '') + (f' ({a["ref"]})' if a['ref'] else ''))
+        for f in lh_falhas:
+            rel.add(f'[LIGHTHOUSE] {rotulo}: {f["titulo"]}' + (f' ({f["itens"]} elementos)' if f['itens'] else ''))
+
+    if extras:
+        t.escreve()
+        t.titulo(f'outras {len(extras)} páginas (análise rápida)')
+        for e in extras:
+            caminho = urlparse(e.get('final') or e['url']).path or '/'
+            if e.get('erro') or e.get('status', 200) >= 400:
+                t.item('✗', 'vermelho', caminho, t.p(e.get('erro') or f'HTTP {e["status"]}', 'vermelho'), recuo=4)
+                rel.add('', f'Página {e.get("final") or e["url"]}: {e.get("erro") or "HTTP " + str(e["status"])}')
+                continue
+            a11y = nota_de([a for a in e['achados'] if a['cat'] == 'acessibilidade'])
+            seo = nota_de([a for a in e['achados'] if a['cat'] == 'seo'])
+            prob = sum(1 for a in e['achados'] if a['nivel'] == 'falha')
+            cor = 'verde' if prob == 0 else 'amarelo' if prob < 3 else 'vermelho'
+            t.item('●', cor, caminho, t.p(f'a11y {a11y} · SEO {seo} · {prob} falha{"s" if prob != 1 else ""}', 'sub'), recuo=4)
+            rel.add('', f'Página {e["final"]}: acessibilidade {a11y}, SEO {seo}')
+            for a in e['achados']:
+                if a['nivel'] in ('falha', 'aviso'):
+                    rel.add(f'  [{a["nivel"].upper()}] {a["titulo"]}' + (f' — {"; ".join(a["exemplos"])}' if a['exemplos'] else ''))
+
+    if lh is None and not args.rapido and lh_erro:
+        t.escreve()
+        t.paragrafo('Com Node e Chrome (ou Edge) instalados, o raio-x também roda o Lighthouse: notas oficiais, '
+                    'Core Web Vitals e o teste de contraste de cores.', 4, 'apagado')
+    CASA.joinpath('raiox').mkdir(parents=True, exist_ok=True)
+    hist_arq.write_text(json.dumps({'url': res['final'], 'quando': datetime.now(timezone.utc).isoformat(),
+                                    'notas': {k: v for k, v in notas.items() if v is not None}, 'fontes': fontes,
+                                    'problemas': sorted({a['id'] for a in achados if a['nivel'] in ('falha', 'aviso')})}),
+                        encoding='utf-8')
+    if args.json:
+        Path(args.json).write_text(json.dumps({'url': res['final'], 'notas': notas, 'achados': achados, 'lighthouse': lh,
+                                               'paginas': extras}, ensure_ascii=False, indent=2), encoding='utf-8')
+        t.nota(f'    JSON: {caminho_curto(args.json, t.largura - 12)}', 0)
+    t.escreve()
+    t.nota(f'    relatório: {caminho_curto(rel.salva(), t.largura - 17)}', 0)
+    entrega_resumo_ia(t, args, gera_resumo_ia(res, notas, lh, extras, fontes), 'raiox')
+    return 0
+
+
+# ═══════════════════════════════ 10. peso ═══════════════════════════════
+
+TIPOS_PESO = [('script', 'JavaScript', 'amarelo'), ('stylesheet', 'CSS', 'azul'), ('image', 'imagens', 'verde'),
+              ('font', 'fontes', 'roxo'), ('document', 'HTML', 'pessego'), ('media', 'vídeo e áudio', 'vermelho'),
+              ('other', 'outros', 'sub')]
+# metas para o celular, em KB transferidos: até o primeiro número é bom, até o segundo é aceitável
+ORCAMENTO = {'total': (1600, 3000), 'script': (350, 700), 'stylesheet': (100, 200), 'image': (900, 2000),
+             'font': (150, 300), 'document': (60, 150), 'media': (1000, 4000)}
+ORCAMENTO_REQ = (50, 100)
+MEDIANA_WEB = 2.3 * 1024 ** 2  # HTTP Archive (Web Almanac 2024): mediana das páginas no celular
+TIPO_LH = {'Document': 'document', 'Script': 'script', 'Stylesheet': 'stylesheet', 'Image': 'image', 'Font': 'font',
+           'Media': 'media'}
+TERCEIROS = [(r'fonts\.(googleapis|gstatic)\.com', 'Google Fonts'), (r'maps\.(google|googleapis)\.com', 'Google Maps'),
+             (r'googletagmanager\.com|google-analytics\.com', 'Google Analytics'), (r'recaptcha', 'reCAPTCHA'),
+             (r'doubleclick\.net|googlesyndication\.com|adservice\.google', 'Google Ads'),
+             (r'youtube(-nocookie)?\.com|ytimg\.com', 'YouTube'), (r'facebook\.(net|com)|fbcdn\.net', 'Meta'),
+             (r'cdnjs\.cloudflare\.com', 'cdnjs'), (r'jsdelivr\.net', 'jsDelivr'), (r'unpkg\.com', 'unpkg'),
+             (r'fontawesome', 'Font Awesome'), (r'hotjar', 'Hotjar'), (r'clarity\.ms', 'Microsoft Clarity'),
+             (r'vercel-insights|vitals\.vercel|vercel\.live', 'Vercel Analytics'), (r'cloudflareinsights', 'Cloudflare Analytics'),
+             (r'code\.jquery\.com', 'jQuery (CDN)'), (r'tailwindcss\.com', 'Tailwind (CDN)'), (r'tiktok', 'TikTok'),
+             (r'linkedin|licdn', 'LinkedIn'), (r'gstatic\.com|googleapis\.com', 'Google')]
+# o que o Lighthouse mede em bytes que dá para economizar
+LH_ECONOMIAS = ['unused-javascript', 'unused-css-rules', 'modern-image-formats', 'uses-optimized-images',
+                'uses-responsive-images', 'offscreen-images', 'uses-text-compression', 'unminified-javascript',
+                'unminified-css', 'efficient-animated-content', 'duplicated-javascript', 'legacy-javascript']
+
+
+def dominio_base(host):
+    partes = (host or '').lower().split('.')
+    # kessleru.com.br e kessleru.github.io contam como o mesmo site em qualquer subdomínio
+    if len(partes) >= 3 and (partes[-2] in ('com', 'net', 'org', 'gov', 'edu', 'co') and len(partes[-1]) == 2
+                             or '.'.join(partes[-2:]) in ('github.io', 'vercel.app', 'netlify.app', 'pages.dev')):
+        return '.'.join(partes[-3:])
+    return '.'.join(partes[-2:])
+
+
+def nome_terceiro(host):
+    return next((n for rx, n in TERCEIROS if re.search(rx, host or '', re.I)), host)
+
+
+def tipo_do_arquivo(url, content_type=''):
+    ct = (content_type or '').split(';')[0].strip().lower()
+    caminho = urlparse(url).path.lower()
+    ext = caminho.rsplit('.', 1)[-1] if '.' in caminho.rsplit('/', 1)[-1] else ''
+    if 'javascript' in ct or ext in ('js', 'mjs', 'cjs'):
+        return 'script'
+    if 'css' in ct or ext == 'css':
+        return 'stylesheet'
+    if ct.startswith('image/') or ext in ('png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'ico', 'bmp'):
+        return 'image'
+    if 'font' in ct or ext in ('woff', 'woff2', 'ttf', 'otf', 'eot'):
+        return 'font'
+    if ct.startswith(('video/', 'audio/')) or ext in ('mp4', 'webm', 'mov', 'mp3', 'ogg', 'wav', 'm4a'):
+        return 'media'
+    if 'html' in ct:
+        return 'document'
+    return 'other'
+
+
+def nome_arquivo(url, n=40):
+    u = urlparse(url)
+    nome = u.path.rstrip('/').rsplit('/', 1)[-1] or u.netloc
+    return corta(nome, n)
+
+
+def _max_age(cab):
+    m = re.search(r'max-age=(\d+)', cab.get('cache-control', ''))
+    if m:
+        return int(m.group(1))
+    return 0 if 'no-cache' in cab.get('cache-control', '') or 'no-store' in cab.get('cache-control', '') else None
+
+
+def _fontes_do_css(css, base):
+    """Fontes que o navegador baixaria: a primeira de cada @font-face, só nos subconjuntos latinos."""
+    fontes = []
+    for bloco in re.findall(r'@font-face\s*{([^}]*)}', css, re.I):
+        faixa = re.search(r'unicode-range\s*:\s*([^;]+)', bloco, re.I)
+        # o Google Fonts manda um bloco por alfabeto; quem lê português só baixa o latino
+        if faixa and not re.search(r'U\+0{1,4}(-|,|\s|$)', faixa.group(1), re.I):
+            continue
+        src = re.search(r'src\s*:\s*([^;]+)', bloco, re.I)
+        m = src and re.search(r'url\(\s*[\'"]?([^\'")]+)', src.group(1))
+        if m:
+            fontes.append(absoluto(base, m.group(1)))
+    imports = [absoluto(base, u) for u in re.findall(r'@import\s+(?:url\()?\s*[\'"]?([^\'")\s;]+)', css)]
+    return [f for f in fontes if f], [i for i in imports if i]
+
+
+def _baixa_recurso(url):
+    r = busca(url, tempo=25)
+    cab = r['cabecalhos']
+    tipo = tipo_do_arquivo(r['url_final'], cab.get('content-type'))
+    return {'url': url, 'tipo': tipo, 'status': r['status'], 'erro': r['erro'], 'transferido': r['baixado'],
+            'tamanho': len(r['corpo']), 'compressao': cab.get('content-encoding', ''), 'cache': _max_age(cab),
+            'corpo': r['corpo'] if tipo in ('script', 'stylesheet', 'document') or url.lower().split('?')[0].endswith('.svg') else b''}
+
+
+def mede_estatico(url, nav, pr=None):
+    pag = busca(url)
+    if pag['erro'] or not pag['status']:
+        return {'url': url, 'erro': pag['erro'] or 'sem resposta'}
+    final = pag['url_final']
+    html_bruto = pag['corpo'].decode('utf-8', 'replace')
+    bruto = LeitorHTML(html_bruto)
+    modulos = any((s.get('type') or '').lower() == 'module' for s in bruto.scripts)
+    raiz_vazia = re.search(r'<div[^>]+id=["\'](root|app|__next|__nuxt|svelte)["\'][^>]*>\s*</div>', html_bruto, re.I)
+    spa = bool(raiz_vazia) or (len(bruto.texto) < 40 and modulos and not bruto.titulos)
+    d, dom = bruto, ''
+    if spa and nav:
+        if pr:
+            pr.atual = 'renderizando com o navegador (site com JavaScript)'
+        dom = dom_renderizado(nav, final) or ''
+        if dom:
+            d = LeitorHTML(dom)
+    agora, depois = [], []
+    for s in bruto.scripts + d.scripts:
+        agora.append(absoluto(final, s.get('src')))
+    for l in bruto.links + d.links:
+        rel = (l.get('rel') or '').lower().split()
+        if {'stylesheet', 'modulepreload', 'preload', 'icon'} & set(rel) and (l.get('media') or '').lower() != 'print':
+            agora.append(absoluto(final, l.get('href')))
+    for i in d.imgs:
+        src = i.get('src') or (i.get('srcset') or '').split(',')[0].strip().split(' ')[0]
+        # imagem com loading="lazy" só desce quando a pessoa rola até ela
+        (depois if (i.get('loading') or '').lower() == 'lazy' else agora).append(absoluto(final, src))
+    for m in d.midias:
+        agora.append(absoluto(final, m.get('poster')))
+        depois.append(absoluto(final, m.get('src')))
+    agora = [u for u in dict.fromkeys(agora) if u]
+    depois = [u for u in dict.fromkeys(depois) if u and u not in agora]
+    if pr:
+        pr.atual = f'baixando {len(agora) + len(depois)} arquivos da página'
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        recursos = list(ex.map(_baixa_recurso, agora))
+        sob_demanda = list(ex.map(_baixa_recurso, depois))
+        vistos = set(agora) | set(depois)
+        # fontes e @import dentro dos CSS, até dois níveis
+        for _ in range(2):
+            novos = []
+            for r in recursos:
+                if r['tipo'] == 'stylesheet' and r['corpo'] and not r.get('_lido'):
+                    r['_lido'] = True
+                    fontes, imports = _fontes_do_css(r['corpo'].decode('utf-8', 'replace'), r['url'])
+                    novos += [u for u in fontes + imports if u not in vistos]
+                    vistos.update(fontes + imports)
+            if not novos:
+                break
+            recursos += list(ex.map(_baixa_recurso, list(dict.fromkeys(novos))))
+    doc = {'url': final, 'tipo': 'document', 'status': pag['status'], 'erro': None, 'transferido': pag['baixado'] or len(pag['corpo']),
+           'tamanho': len(pag['corpo']), 'compressao': pag['cabecalhos'].get('content-encoding', ''),
+           'cache': _max_age(pag['cabecalhos']), 'corpo': pag['corpo']}
+    recursos = [doc] + [r for r in recursos if not r['erro'] and r['status'] < 400 and r['transferido']]
+    sob_demanda = [r for r in sob_demanda if not r['erro'] and r['status'] < 400 and r['transferido']]
+    host = urlparse(final).hostname
+    for r in recursos + sob_demanda:
+        h = urlparse(r['url']).hostname
+        r['terceiro'] = nome_terceiro(h) if dominio_base(h) != dominio_base(host) else None
+        r['sem_uso'] = None
+    tec, hospedagem = detecta_stack(html_bruto + dom, pag['cabecalhos'])
+    return {'url': url, 'final': final, 'status': pag['status'], 'fonte': 'propria', 'recursos': recursos,
+            'sob_demanda': sob_demanda, 'economias': economias_estaticas(recursos, html_bruto, hospedagem),
+            'tec': tec, 'hospedagem': hospedagem, 'spa': spa, 'renderizado': bool(dom), 'html': html_bruto,
+            'ancoras': [absoluto(final, a['href']) for a in d.ancoras]}
+
+
+def economias_estaticas(recursos, html_bruto, hospedagem):
+    E = []
+    texto_sem_gzip = [r for r in recursos if not r['compressao'] and r['tamanho'] > 1400 and
+                      (r['tipo'] in ('script', 'stylesheet', 'document') or r['url'].lower().split('?')[0].endswith('.svg'))]
+    if texto_sem_gzip:
+        # gzip deixa HTML, CSS e JS com uns 30% do tamanho
+        E.append({'id': 'uses-text-compression', 'titulo': 'Ligar compressão (gzip ou brotli) no servidor',
+                  'arquivos': [(r['url'], int(r['tamanho'] * 0.7)) for r in texto_sem_gzip]})
+    antigas = [r for r in recursos if r['tipo'] == 'image' and re.search(r'\.(jpe?g|png)(\?|$)', r['url'], re.I)
+               and r['transferido'] > 50 * 1024]
+    if antigas:
+        # WebP fica em média 25–35% menor que JPG e bem menor que PNG de foto; a conta usa 30%, por baixo
+        E.append({'id': 'modern-image-formats', 'titulo': 'Converter imagens JPG/PNG para WebP ou AVIF',
+                  'arquivos': [(r['url'], int(r['transferido'] * 0.3)) for r in antigas]})
+    gifs = [r for r in recursos if re.search(r'\.gif(\?|$)', r['url'], re.I) and r['transferido'] > 100 * 1024]
+    if gifs:
+        E.append({'id': 'efficient-animated-content', 'titulo': 'Trocar GIF animado por vídeo (MP4/WebM)',
+                  'arquivos': [(r['url'], int(r['transferido'] * 0.8)) for r in gifs]})
+    fontes_velhas = [r for r in recursos if r['tipo'] == 'font' and re.search(r'\.(ttf|otf|eot|woff)(\?|$)', r['url'], re.I)]
+    if fontes_velhas:
+        E.append({'id': 'fontes-woff2', 'titulo': 'Usar fontes em WOFF2',
+                  'arquivos': [(r['url'], int(r['transferido'] * (0.3 if r['url'].lower().split('?')[0].endswith('.woff') else 0.5)))
+                               for r in fontes_velhas]})
+    sem_minificar = []
+    for r in recursos:
+        if r['tipo'] in ('script', 'stylesheet') and r['tamanho'] > 20 * 1024 and r['corpo']:
+            txt = r['corpo']
+            # código minificado quase não tem quebra de linha nem indentação
+            if txt.count(b'\n') > len(txt) / 80 and txt.count(b'  ') > len(txt) / 50:
+                sem_minificar.append(r)
+    if sem_minificar:
+        E.append({'id': 'unminified-javascript', 'titulo': 'Minificar JavaScript e CSS (build de produção)',
+                  'arquivos': [(r['url'], int(r['transferido'] * 0.3)) for r in sem_minificar]})
+    b64 = sum(len(m) for m in re.findall(r'data:image/[a-z+]+;base64,[A-Za-z0-9+/=]+', html_bruto))
+    for r in recursos:
+        if r['tipo'] == 'stylesheet' and r['corpo']:
+            b64 += sum(len(m) for m in re.findall(rb'data:image/[a-z+]+;base64,[A-Za-z0-9+/=]+', r['corpo']))
+    if b64 > 20 * 1024:
+        E.append({'id': 'base64', 'titulo': 'Tirar imagens em base64 de dentro do HTML/CSS',
+                  'arquivos': [('(embutidas no HTML/CSS)', int(b64 * 0.25))]})
+    for e in E:
+        e['bytes'] = sum(b for _, b in e['arquivos'])
+    return sorted([e for e in E if e['bytes'] > 1024], key=lambda e: -e['bytes'])
+
+
+def mede_lighthouse(dados, url):
+    audits = dados.get('audits', {})
+    final = dados.get('finalDisplayedUrl') or dados.get('finalUrl') or url
+    host = urlparse(final).hostname
+    proprios = set()
+    for ent in dados.get('entities') or []:
+        if ent.get('isFirstParty'):
+            proprios.update(urlparse(o).hostname for o in ent.get('origins', []))
+    sem_uso = {}
+    for aid in ('unused-javascript', 'unused-css-rules'):
+        for it in ((audits.get(aid) or {}).get('details') or {}).get('items') or []:
+            if it.get('url') and it.get('totalBytes'):
+                sem_uso[it['url']] = round(100 * (it.get('wastedBytes') or 0) / it['totalBytes'])
+    recursos = []
+    for it in ((audits.get('network-requests') or {}).get('details') or {}).get('items') or []:
+        u = it.get('url') or ''
+        if not u.startswith('http') or not it.get('transferSize'):
+            continue
+        h = urlparse(u).hostname
+        terceiro = None
+        if h not in proprios and dominio_base(h) != dominio_base(host):
+            terceiro = it.get('entity') if isinstance(it.get('entity'), str) else nome_terceiro(h)
+        tipo = TIPO_LH.get(it.get('resourceType')) or tipo_do_arquivo(u, it.get('mimeType'))
+        recursos.append({'url': u, 'tipo': tipo, 'transferido': it['transferSize'], 'tamanho': it.get('resourceSize') or 0,
+                         'terceiro': terceiro, 'sem_uso': sem_uso.get(u), 'cache': None})
+    for it in ((audits.get('uses-long-cache-ttl') or {}).get('details') or {}).get('items') or []:
+        for r in recursos:
+            if r['url'] == it.get('url'):
+                r['cache'] = int((it.get('cacheLifetimeMs') or 0) / 1000)
+    economias = []
+    for aid in LH_ECONOMIAS:
+        a = audits.get(aid) or {}
+        det = a.get('details') or {}
+        itens = [(it.get('url'), it.get('wastedBytes') or 0) for it in det.get('items') or [] if it.get('url')]
+        total = det.get('overallSavingsBytes') or sum(b for _, b in itens)
+        if (a.get('score') is None or a['score'] < 1) and total > 2048:
+            economias.append({'id': aid, 'titulo': a.get('title', aid), 'bytes': total,
+                              'arquivos': sorted(itens, key=lambda x: -x[1])})
+    economias.sort(key=lambda e: -e['bytes'])
+    lcp = None
+    det = (audits.get('largest-contentful-paint-element') or {}).get('details') or {}
+    for bloco in det.get('items') or []:
+        for it in (bloco.get('items') if isinstance(bloco, dict) and 'items' in bloco else [bloco]):
+            node = (it or {}).get('node') or {}
+            if node.get('snippet'):
+                lcp = node['snippet']
+                break
+        if lcp:
+            break
+    return {'url': url, 'final': final, 'fonte': 'lighthouse', 'recursos': recursos, 'sob_demanda': [],
+            'economias': economias, 'lcp': lcp,
+            'lcp_tempo': (audits.get('largest-contentful-paint') or {}).get('displayValue')}
+
+
+def resumo_por_tipo(recursos):
+    tipos = {}
+    for r in recursos:
+        t_ = tipos.setdefault(r['tipo'], {'bytes': 0, 'n': 0})
+        t_['bytes'] += r['transferido']
+        t_['n'] += 1
+    return tipos
+
+
+def economia_total(economias):
+    # o mesmo arquivo aparece em mais de uma sugestão (sem uso e sem minificar): conta o maior ganho de cada um
+    por_arquivo = {}
+    for e in economias:
+        if e['id'] == 'offscreen-images':
+            continue  # imagem fora da tela só é adiada, não some
+        for u, b in e['arquivos'] or [(e['id'], e['bytes'])]:
+            por_arquivo[u] = max(por_arquivo.get(u, 0), b)
+    return sum(por_arquivo.values())
+
+
+def meta_mb():
+    return f'{ORCAMENTO["total"][0] / 1024:.1f} MB'.replace('.', ',')
+
+
+def nivel_orcamento(chave, bytes_):
+    bom, ok = ORCAMENTO[chave]
+    kb = bytes_ / 1024
+    return 'ok' if kb <= bom else 'aviso' if kb <= ok else 'falha'
+
+
+def co2_por_visita(bytes_):
+    # modelo Sustainable Web Design (v3): 0,81 kWh por GB transferido, 442 g de CO2 por kWh (média mundial)
+    return bytes_ / 1024 ** 3 * 0.81 * 442
+
+
+def onde_mexer_peso(eid, med):
+    tec, host = med.get('tec') or [], med.get('hospedagem')
+    vite, nxt = 'Vite' in tec, 'Next.js' in tec
+    dicas = {
+        'unused-javascript': 'Divida o código por rota com `import()` dinâmico (`React.lazy` + `Suspense`) e carregue '
+                             'só o que a primeira tela usa. Veja o que entra no pacote com '
+                             + ('`@next/bundle-analyzer`' if nxt else '`npx vite-bundle-visualizer`' if vite else 'um analisador de bundle')
+                             + '. Troque bibliotecas grandes por menores (moment → dayjs, lodash → import por função).',
+        'unused-css-rules': 'Importe só as partes usadas de bibliotecas de CSS (Bootstrap, animate.css, ícones). '
+                            'Com Tailwind, confira se o `content`/`@source` cobre só os arquivos do projeto.',
+        'modern-image-formats': ('Use `next/image`, que já serve WebP/AVIF. ' if nxt else '')
+                                + 'Converta para WebP ou AVIF (squoosh.app, ou o pacote `sharp` num script) e troque o caminho no código; '
+                                  'se precisar de navegador antigo, use `<picture>` com o JPG de reserva.',
+        'uses-optimized-images': 'Comprima as imagens (qualidade 75–80 é suficiente para foto) antes de pôr no projeto.',
+        'uses-responsive-images': 'A imagem é maior do que aparece na tela: gere tamanhos menores e use `srcset` + `sizes`'
+                                  + (' (o `next/image` faz isso sozinho)' if nxt else '') + '.',
+        'offscreen-images': 'Ponha `loading="lazy"` nas imagens abaixo da dobra (nunca na primeira imagem grande, que é o LCP).',
+        'uses-text-compression': ('A ' + host + ' já comprime sozinha: confira se esses arquivos não vêm de outro servidor. '
+                                  if host in ('Vercel', 'Netlify', 'GitHub Pages', 'Cloudflare') else
+                                  'Ligue gzip/brotli no servidor (Express: pacote `compression`; nginx: `gzip on`). '),
+        'unminified-javascript': 'Publique o resultado do `npm run build`, nunca os arquivos de desenvolvimento; '
+                                 'para JS/CSS escritos à mão, minifique com `npx esbuild arquivo.js --minify`.',
+        'unminified-css': 'Publique o CSS do build de produção, ou minifique com `npx esbuild estilo.css --minify`.',
+        'efficient-animated-content': 'Troque o GIF por `<video autoplay muted loop playsinline>` com MP4/WebM.',
+        'duplicated-javascript': 'A mesma biblioteca entra mais de uma vez: alinhe as versões no `package.json` e rode `npm dedupe`.',
+        'legacy-javascript': 'O build inclui polyfills para navegadores antigos: ajuste o `browserslist`'
+                             + (' ou o `build.target` do Vite' if vite else '') + '.',
+        'fontes-woff2': 'Converta para WOFF2 e carregue só os pesos usados; `@fontsource/<fonte>` auto-hospeda já em WOFF2.',
+        'base64': 'Imagem em base64 não entra em cache e atrasa o primeiro desenho: salve como arquivo e referencie pelo caminho.',
+    }
+    return dicas.get(eid, '').strip()
+
+
+def gera_resumo_peso(med, total, tipos, n_req, economia, maiores, terceiros):
+    fonte = 'Lighthouse, ' + ('computador' if med.get('desktop') else 'celular') if med['fonte'] == 'lighthouse' else 'medição própria'
+    rotulos = {k: r for k, r, _ in TIPOS_PESO}
+    L = [f'# Peso de {med["final"]}: o que reduzir', '',
+         f'> Medido pelo ferramentas-git em {datetime.now():%d/%m/%Y %H:%M} ({fonte}). '
+         f'Total: {humano(total)} em {n_req} requisições.', '', '## Contexto', '',
+         f'- Meta para o celular: até {meta_mb()} por página; a mediana da web é ~2,3 MB.']
+    if med.get('tec') or med.get('hospedagem'):
+        L.append(f'- Tecnologia detectada: {", ".join(med.get("tec") or ["não identificada"])}'
+                 + (f' · hospedagem: {med["hospedagem"]}' if med.get('hospedagem') else ''))
+    L.append('- Por tipo: ' + ', '.join(f'{rotulos[k]} {humano(v["bytes"])}' for k, v in
+                                        sorted(tipos.items(), key=lambda x: -x[1]['bytes'])))
+    if med.get('lcp'):
+        L.append(f'- Elemento do LCP ({med.get("lcp_tempo") or "?"}): `{corta(med["lcp"], 140)}` — não ponha `loading="lazy"` nele.')
+    L += ['', '## O que fazer', '',
+          'Você está no código deste site. Reduza o peso seguindo os itens abaixo, do maior ganho para o menor:', '',
+          '1. Encontre no código onde cada arquivo listado é usado ou importado.',
+          '2. Não mude o visual nem tire funcionalidade para ganhar peso; se um item exigir isso, pule e explique.',
+          '3. Imagens: gere a versão nova ao lado da antiga e troque as referências; só apague a antiga se nada mais a usar.',
+          '4. No final, liste o que mudou arquivo por arquivo e o ganho esperado.', '']
+    if economia:
+        L += [f'Ganho possível estimado: **{humano(economia)}** (de {humano(total)} para ~{humano(max(0, total - economia))}).', '']
+    for i, e in enumerate(med['economias'], 1):
+        L.append(f'### {i}. {md(e["titulo"])} (−{humano(e["bytes"])})')
+        for u, b in e['arquivos'][:8]:
+            L.append(f'- [ ] `{u}`' + (f' — {humano(b)} a menos' if b else ''))
+        if len(e['arquivos']) > 8:
+            L.append(f'- … e mais {len(e["arquivos"]) - 8}')
+        dica = onde_mexer_peso(e['id'], med)
+        if dica:
+            L.append(f'- **Como:** {dica}')
+        L.append('')
+    if not med['economias']:
+        L += ['Nenhuma economia grande apontada. Confira os arquivos mais pesados abaixo.', '']
+    estourados = [(k, v) for k, v in tipos.items() if k in ORCAMENTO and nivel_orcamento(k, v['bytes']) != 'ok']
+    if estourados:
+        L += ['## Acima da meta', '']
+        L += [f'- {rotulos[k]}: {humano(v["bytes"])} (meta: até {ORCAMENTO[k][0]} KB)' for k, v in estourados] + ['']
+    L += ['## Arquivos mais pesados', '', '| arquivo | tipo | transferido | sem uso |', '| --- | --- | --- | --- |']
+    for r in maiores:
+        L.append(f'| `{corta(r["url"], 90)}` | {rotulos[r["tipo"]]} | {humano(r["transferido"])} | '
+                 + (f'{r["sem_uso"]}%' if r.get('sem_uso') is not None else '—') + ' |')
+    L.append('')
+    if terceiros:
+        L += ['## Terceiros', '', 'Scripts e arquivos de outros domínios. Avalie se cada um é necessário, se pode carregar '
+              'depois da interação ou ser auto-hospedado (fontes, por exemplo):', '']
+        L += [f'- {n}: {humano(v["bytes"])} em {pl(v["n"], "arquivo")}' for n, v in terceiros] + ['']
+    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas-git.py peso {med["final"]}`',
+          f'- [ ] Total abaixo de {humano(total)} (meta: {meta_mb()})',
+          '- [ ] O site continua igual na tela, no celular e no computador', '']
+    return '\n'.join(L)
+
+
+def barra_peso(t, fracao, larg, cor):
+    cheio = max(1 if fracao > 0 else 0, round(larg * fracao))
+    vazio = '■' if t.cor else ('-' if t.nivel == 'ascii' else '·')
+    return t.p(('#' if t.nivel == 'ascii' else '■') * cheio, cor) + t.p(vazio * (larg - cheio), 'fundo')
+
+
+def ferramenta_peso(t, args):
+    url = args.url.strip()
+    if not re.match(r'https?://', url):
+        url = ('http://' if re.match(r'(localhost|127\.0\.0\.1)', url) else 'https://') + url
+    nav = acha_navegador()
+    t.prompt('peso', url)
+    paginas = []
+    with Progresso(t, None, 'medindo') as pr:
+        pr.atual = 'baixando a página'
+        est = mede_estatico(url, nav, pr)
+        med, lh_erro = est, None
+        if not est.get('erro') and not args.rapido:
+            pr.atual = 'rodando o Lighthouse (pode levar 1 minuto)'
+            dados, lh_erro = roda_lighthouse(est['final'], nav, args.desktop, 'performance')
+            if dados:
+                med = mede_lighthouse(dados, est['final'])
+                if not med['recursos']:
+                    med, lh_erro = est, 'o Lighthouse não devolveu a lista de arquivos'
+                else:
+                    med.update(tec=est['tec'], hospedagem=est['hospedagem'], desktop=args.desktop)
+        if not est.get('erro') and args.paginas:
+            host = urlparse(est['final']).netloc
+            internos = [u for u in dict.fromkeys(est['ancoras']) if u and urlparse(u).netloc == host
+                        and u.rstrip('/') != est['final'].rstrip('/')
+                        and not re.search(r'\.(pdf|zip|png|jpe?g|svg|xml|webp)(\?|$)', u, re.I)]
+            if len(internos) < args.paginas:
+                _, sms = info_robots(f'{urlparse(est["final"]).scheme}://{host}')
+                internos += [u for u in le_sitemap(f'{urlparse(est["final"]).scheme}://{host}', sms)
+                             if u not in internos and u.rstrip('/') != est['final'].rstrip('/')]
+            for u in internos[:args.paginas]:
+                pr.atual = caminho_curto(u)
+                paginas.append(mede_estatico(u, None))
+    if est.get('erro'):
+        t.erro(f'Não consegui abrir {url}: {est["erro"]}.')
+        return 1
+
+    recursos = med['recursos']
+    total = sum(r['transferido'] for r in recursos)
+    tipos = resumo_por_tipo(recursos)
+    n_req = len(recursos)
+    linha = [t.p(humano(total), 'verde' if nivel_orcamento('total', total) == 'ok' else 'amarelo'
+                 if nivel_orcamento('total', total) == 'aviso' else 'vermelho', True),
+             t.p(f'{n_req} requisições', 'texto')]
+    descomp = sum(r['tamanho'] for r in recursos)
+    if descomp > total * 1.15:
+        linha.append(t.p(f'{humano(descomp)} descomprimidos', 'sub'))
+    linha.append(t.p('Lighthouse · ' + ('computador' if args.desktop else 'celular') if med['fonte'] == 'lighthouse'
+                     else 'medição própria', 'sub'))
+    if med.get('tec') or med.get('hospedagem'):
+        linha.append(t.p(' + '.join(med.get('tec') or []) + (f' na {med["hospedagem"]}' if med.get('hospedagem') else ''), 'roxo'))
+    if med['final'].rstrip('/') != url.rstrip('/'):
+        t.nota(f'  → {corta(med["final"], t.largura - 6)}', 2)
+    t.partes(linha)
+    vezes = total / MEDIANA_WEB
+    t.paragrafo(f'{vezes:.1f}× a mediana da web no celular (~2,3 MB)'.replace('.', ',') if vezes >= 1.05 else
+                f'{(1 - vezes) * 100:.0f}% mais leve que a mediana da web no celular (~2,3 MB)', 4, 'apagado')
+    if lh_erro and not args.rapido:
+        t.paragrafo(f'Lighthouse: {lh_erro} · usando a medição própria', 4, 'apagado')
+    if est.get('spa') and not est.get('renderizado') and med['fonte'] == 'propria':
+        t.paragrafo('Site montado por JavaScript e sem navegador para renderizar: os arquivos que o JavaScript '
+                    'carrega depois ficam de fora da conta.', 4, 'amarelo')
+
+    # histórico: a última medição da mesma URL, pela mesma fonte
+    hist_arq = CASA / 'peso' / _arquivo_historico(med['final']).name
+    anterior = None
+    try:
+        anterior = json.loads(hist_arq.read_text(encoding='utf-8'))
+        if anterior.get('fonte') != med['fonte'] or anterior.get('desktop', False) != bool(args.desktop):
+            anterior = None
+    except (OSError, ValueError):
+        pass
+
+    def delta(atual, antes):
+        if antes is None or abs(atual - antes) < 1024:
+            return ''
+        dif = atual - antes
+        return t.p(f' {"↑" if dif > 0 else "↓"}{humano(abs(dif))}', 'vermelho' if dif > 0 else 'verde')
+
+    rotulos = {k: r for k, r, _ in TIPOS_PESO}
+    t.escreve()
+    t.titulo('por tipo')
+    larg = max(4, min(16, t.largura - 46))
+    for k, rotulo, cor in TIPOS_PESO:
+        v = tipos.get(k)
+        if not v:
+            continue
+        pct = 100 * v['bytes'] / max(total, 1)
+        estouro = ''
+        if k in ORCAMENTO and nivel_orcamento(k, v['bytes']) != 'ok':
+            estouro = t.p(' !', 'amarelo' if nivel_orcamento(k, v['bytes']) == 'aviso' else 'vermelho', True)
+        antes = (anterior or {}).get('tipos', {}).get(k)
+        tam, arqs = humano(v['bytes']), f"{v['n']:>3} arq."
+        t.escreve(f'    {t.p(f"{rotulo:<13}", "texto")}{barra_peso(t, v["bytes"] / max(total, 1), larg, cor)} '
+                  f'{t.p(f"{tam:>8}", "texto")} {t.p(f"{pct:>3.0f}%", "sub")} '
+                  f'{t.p(arqs, "apagado")}{estouro}{delta(v["bytes"], antes)}')
+    tam, rot = humano(total), 'total'
+    t.escreve(f'    {t.p(f"{rot:<13}", "texto", True)}{" " * (larg + 1)}{t.p(f"{tam:>8}", "texto", True)}'
+              f'      {t.p(f"{n_req:>3} arq.", "apagado")}{delta(total, (anterior or {}).get("total"))}')
+    if med.get('sob_demanda'):
+        extra = sum(r['transferido'] for r in med['sob_demanda'])
+        t.paragrafo(f'+ {humano(extra)} em {pl(len(med["sob_demanda"]), "arquivo")} que só descem se a pessoa rolar '
+                    'ou der play (loading="lazy", vídeo)', 4, 'apagado')
+    if anterior:
+        t.paragrafo(f'comparado com a última medição ({ha_quanto_iso(anterior.get("quando"))}): '
+                    + ('mais pesado' if total > anterior.get('total', 0) + 1024 else
+                       'mais leve' if total < anterior.get('total', 0) - 1024 else 'praticamente igual'), 4, 'apagado')
+
+    # metas
+    fora = [(k, v) for k, v in tipos.items() if k in ORCAMENTO and nivel_orcamento(k, v['bytes']) != 'ok']
+    req_nivel = 'ok' if n_req <= ORCAMENTO_REQ[0] else 'aviso' if n_req <= ORCAMENTO_REQ[1] else 'falha'
+    t.escreve()
+    t.titulo('metas para o celular')
+    estilo = {'ok': ('✓', 'verde'), 'aviso': ('!', 'amarelo'), 'falha': ('✗', 'vermelho')}
+    nv = nivel_orcamento('total', total)
+    t.item(estilo[nv][0], estilo[nv][1], 'página inteira', t.p(f'{humano(total)} / meta {meta_mb()}', estilo[nv][1]), recuo=4)
+    t.item(estilo[req_nivel][0], estilo[req_nivel][1], 'requisições', t.p(f'{n_req} / meta {ORCAMENTO_REQ[0]}', estilo[req_nivel][1]), recuo=4)
+    for k, v in sorted(fora, key=lambda x: -x[1]['bytes']):
+        nv = nivel_orcamento(k, v['bytes'])
+        t.item(estilo[nv][0], estilo[nv][1], rotulos[k], t.p(f'{humano(v["bytes"])} / meta {ORCAMENTO[k][0]} KB', estilo[nv][1]), recuo=4)
+    if not fora:
+        t.paragrafo('JavaScript, CSS, imagens e fontes dentro da meta', 4, 'apagado')
+
+    # mais pesados
+    maiores = sorted(recursos, key=lambda r: -r['transferido'])[:8]
+    t.escreve()
+    t.titulo('os mais pesados')
+    for r in maiores:
+        info = [rotulos[r['tipo']]]
+        if r.get('sem_uso') is not None and r['sem_uso'] >= 20:
+            info.append(f'{r["sem_uso"]}% sem uso')
+        if r.get('terceiro'):
+            info.append(r['terceiro'])
+        cor = 'vermelho' if r['transferido'] > 300 * 1024 else 'amarelo' if r['transferido'] > 100 * 1024 else 'sub'
+        det = ' · '.join(info)
+        # 4 de recuo + 8 do tamanho + 2 + nome + espaço + pontos + espaço + detalhe
+        nome = nome_arquivo(r['url'], max(8, t.largura - 17 - len(det)))
+        pontos = max(1, t.largura - 16 - len(nome) - len(det))
+        tam = humano(r['transferido'])
+        t.escreve(f'    {t.p(f"{tam:>8}", cor, True)}  {t.p(nome, "texto")} '
+                  f'{t.p("·" * pontos, "superficie")} {t.p(det, "apagado")}')
+
+    # terceiros
+    por_terceiro = {}
+    for r in recursos:
+        if r.get('terceiro'):
+            v = por_terceiro.setdefault(r['terceiro'], {'bytes': 0, 'n': 0})
+            v['bytes'] += r['transferido']
+            v['n'] += 1
+    terceiros = sorted(por_terceiro.items(), key=lambda x: -x[1]['bytes'])
+    if terceiros:
+        soma = sum(v['bytes'] for _, v in terceiros)
+        t.escreve()
+        t.titulo(f'terceiros · {humano(soma)} ({100 * soma / max(total, 1):.0f}%)')
+        for nome, v in terceiros[:6]:
+            t.item('●', 'roxo', nome, t.p(f'{humano(v["bytes"])} · {pl(v["n"], "arquivo")}', 'sub'), recuo=4)
+        if len(terceiros) > 6:
+            t.paragrafo(f'e mais {len(terceiros) - 6}', 4, 'apagado')
+
+    # economias
+    economia = economia_total(med['economias'])
+    t.escreve()
+    if med['economias']:
+        t.titulo(f'onde economizar · até {humano(economia)}')
+        for e in med['economias'][:7]:
+            t.item('↳', 'azul', e['titulo'], t.p(f'-{humano(e["bytes"])}', 'verde'), recuo=4)
+            for u, b in e['arquivos'][:2]:
+                t.nota(corta(f'{nome_arquivo(u, 40)}' + (f'  -{humano(b)}' if b else ''), t.largura - 9), 8)
+        if med['fonte'] == 'propria':
+            t.paragrafo('ganhos estimados pela medição própria; o Lighthouse mede também o JavaScript e o CSS sem uso', 4, 'apagado')
+    else:
+        t.titulo('onde economizar')
+        t.ok('nenhuma economia grande à vista.')
+    curtos = [r for r in recursos if r.get('cache') is not None and r['cache'] < 86400 and r['tipo'] != 'document'
+              and not r.get('terceiro')]
+    if curtos and len(curtos) >= max(2, len([r for r in recursos if r['tipo'] != 'document']) // 3):
+        t.paragrafo(f'{pl(len(curtos), "arquivo")} com cache de menos de um dia: quem volta ao site baixa tudo de novo. '
+                    'Arquivo com hash no nome (index-a1b2c3.js) pode ter cache de um ano.', 4, 'amarelo')
+
+    # carbono
+    co2 = co2_por_visita(total)
+    t.escreve()
+    t.paragrafo(f'~{co2:.2f} g de CO₂ por visita · mil visitas por mês ≈ {co2 * 12:.1f} kg por ano'.replace('.', ',')
+                if co2 >= 0.01 else 'menos de 0,01 g de CO₂ por visita', 4, 'apagado')
+
+    if paginas:
+        t.escreve()
+        t.titulo(f'outras {pl(len(paginas), "página")} (medição rápida)')
+        for p in paginas:
+            caminho = urlparse(p.get('final') or p['url']).path or '/'
+            if p.get('erro'):
+                t.item('✗', 'vermelho', caminho, t.p(p['erro'], 'vermelho'), recuo=4)
+                continue
+            tot = sum(r['transferido'] for r in p['recursos'])
+            nv = nivel_orcamento('total', tot)
+            maior = max(p['recursos'], key=lambda r: r['transferido'])
+            t.item('●', estilo[nv][1], caminho, t.p(f'{humano(tot)} · {len(p["recursos"])} arq. · maior: {nome_arquivo(maior["url"], 18)}', 'sub'), recuo=4)
+
+    rel = Relatorio('peso')
+    rel.add(f'URL: {med["final"]}', f'fonte: {med["fonte"]} · total {humano(total)} · {n_req} requisições', '')
+    rel.add(*[f'{rotulos[k]}: {humano(v["bytes"])} em {v["n"]} arquivos' for k, v in tipos.items()], '')
+    rel.add('Arquivos (do mais pesado ao mais leve):')
+    rel.add(*[f'  {humano(r["transferido"]):>9}  {rotulos[r["tipo"]]:<12} {r["url"]}' + (f'  ({r["sem_uso"]}% sem uso)' if r.get('sem_uso') else '')
+              for r in sorted(recursos, key=lambda r: -r['transferido'])], '')
+    for e in med['economias']:
+        rel.add(f'Economia: {e["titulo"]} — {humano(e["bytes"])}', *[f'  {humano(b):>9}  {u}' for u, b in e['arquivos']])
+    for p in paginas:
+        if not p.get('erro'):
+            rel.add('', f'Página {p["final"]}: {humano(sum(r["transferido"] for r in p["recursos"]))} em {len(p["recursos"])} arquivos')
+
+    CASA.joinpath('peso').mkdir(parents=True, exist_ok=True)
+    hist_arq.write_text(json.dumps({'url': med['final'], 'quando': agora_iso(), 'fonte': med['fonte'], 'desktop': bool(args.desktop),
+                                    'total': total, 'tipos': {k: v['bytes'] for k, v in tipos.items()}}), encoding='utf-8')
+    t.escreve()
+    t.nota(f'    relatório: {caminho_curto(rel.salva(), t.largura - 17)}', 0)
+    entrega_resumo_ia(t, args, gera_resumo_peso(med, total, tipos, n_req, economia, maiores, terceiros), 'peso')
+    return 0
+
+
+# ═══════════════════════════════ 11. atualizar ═══════════════════════════════
+
+GRUPOS_ATUALIZAR = [('sistema', 'sistema e programas'), ('linguagens', 'linguagens'), ('pacotes', 'pacotes globais'),
+                    ('editores', 'extensões dos editores')]
+ENV_C = dict(os.environ, LC_ALL='C', LANG='C')  # saída em inglês: é ela que se sabe ler
+
+
+def versao_tupla(v):
+    return tuple(int(x) for x in re.findall(r'\d+', str(v or ''))[:4])
+
+
+def subiu_major(atual, novo):
+    a, n = versao_tupla(atual), versao_tupla(novo)
+    return bool(a and n and n[0] > a[0])
+
+
+def _sai(cmd, tempo=180, env=None):
+    r = roda(cmd, env=env, tempo=tempo)
+    return r.returncode, texto(r.stdout), texto(r.stderr)
+
+
+def _ultimo_quadro(linha):
+    # winget e scoop desenham barras com \r: fica só o que sobrou por último na linha
+    return linha.rsplit('\r', 1)[-1].rstrip()
+
+
+def _tabela_por_cabecalho(saida, colunas):
+    """Lê tabelas de texto (winget): acha a linha de traços e corta as linhas pelas posições do cabeçalho."""
+    linhas = [_ultimo_quadro(l) for l in saida.splitlines()]
+    for i in range(1, len(linhas)):
+        if re.fullmatch(r'-{10,}', linhas[i].strip()):
+            inicios = [m.start() for m in re.finditer(r'\S+', linhas[i - 1])]
+            if len(inicios) < colunas:
+                continue
+            linhas_tab = []
+            for l in linhas[i + 1:]:
+                if not l.strip() or re.match(r'^\d+ ', l) or len(l) < inicios[colunas - 2]:
+                    break
+                linhas_tab.append([l[a:b].strip() for a, b in zip(inicios, inicios[1:] + [None])])
+            return linhas_tab
+    return []
+
+
+def _tabela_por_tracos(saida):
+    """Tabela do PowerShell (scoop): as colunas começam onde começa cada grupo de traços."""
+    linhas = [_ultimo_quadro(l) for l in saida.splitlines()]
+    for i, l in enumerate(linhas):
+        if re.fullmatch(r'[- ]*-{3,}[- ]*', l) and l.count('-') > 6:
+            inicios = [m.start() for m in re.finditer(r'-+', l)]
+            return [[x[a:b].strip() for a, b in zip(inicios, inicios[1:] + [None])] for x in linhas[i + 1:] if x.strip()]
+    return []
+
+
+def _json_web(url):
+    r = busca(url, tempo=20)
+    if r['status'] != 200:
+        return None
+    try:
+        return json.loads(r['corpo'])
+    except ValueError:
+        return None
+
+
+def _pypi(nome):
+    dados = _json_web(f'https://pypi.org/pypi/{quote(nome)}/json')
+    return (dados or {}).get('info', {}).get('version')
+
+
+def _pypi_varios(pares):
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        novos = list(ex.map(lambda p: _pypi(p[0]), pares))
+    return [(n, a, v) for (n, a), v in zip(pares, novos) if v and versao_tupla(v) > versao_tupla(a)]
+
+
+# ---- verificações: cada uma devolve [(nome, versão atual, versão nova)] ----
+
+def checa_winget():
+    _, out, _ = _sai(['winget', 'upgrade', '--accept-source-agreements', '--disable-interactivity'], 240)
+    return [(c[0], c[2], c[3]) for c in _tabela_por_cabecalho(out, 5) if len(c) >= 4 and c[3]]
+
+
+def checa_choco():
+    _, out, _ = _sai(['choco', 'outdated', '-r', '--ignore-pinned', '--no-color'], 240)
+    return [tuple(l.split('|')[:3]) for l in out.splitlines() if l.count('|') >= 3]
+
+
+def checa_scoop():
+    _, out, _ = _sai([shutil.which('scoop'), 'status'], 240)
+    return [(c[0], c[1], c[2]) for c in _tabela_por_tracos(out) if len(c) >= 3 and c[2] and c[2] != c[1]]
+
+
+def checa_brew():
+    _sai(['brew', 'update', '--quiet'], 300)
+    _, out, _ = _sai(['brew', 'outdated', '--json=v2'], 120, dict(os.environ, HOMEBREW_NO_AUTO_UPDATE='1'))
+    dados = json.loads(out or '{}')
+    return [(f['name'], (f.get('installed_versions') or ['?'])[-1], f.get('current_version', '?'))
+            for f in dados.get('formulae', []) + dados.get('casks', [])]
+
+
+def checa_mas():
+    _, out, _ = _sai(['mas', 'outdated'])
+    return [m.groups() for m in re.finditer(r'^\d+\s+(.+?)\s+\((\S+) -> (\S+)\)', out, re.M)]
+
+
+def checa_softwareupdate():
+    _, out, err = _sai(['softwareupdate', '-l'], 300, ENV_C)
+    return [(m.group(1), '', m.group(2)) for m in re.finditer(r'Title: ([^,]+), Version: ([^,]+)', out + err)]
+
+
+def checa_apt():
+    _, out, _ = _sai(['apt', 'list', '--upgradable'], 120, ENV_C)
+    itens = [(m.group(1), m.group(3), m.group(2)) for m in
+             re.finditer(r'^([^/\s]+)/\S+\s+(\S+)\s+\S+\s+\[upgradable from: ([^\]\s]+)\]', out, re.M)]
+    # a lista só se renova com "apt update", que pede sudo; velha, ela pode dizer "em dia" sem estar
+    try:
+        dias = int((time.time() - os.path.getmtime('/var/lib/apt/lists')) // 86400)
+    except OSError:
+        dias = 0
+    if dias >= 2:
+        return (itens or None), f'lista de pacotes de {dias} dias atrás; a atualização baixa a nova antes'
+    return itens
+
+
+def checa_dnf():
+    cod, out, _ = _sai(['dnf', '-q', 'check-update'], 300, ENV_C)
+    if cod not in (0, 100):
+        raise RuntimeError('o dnf não respondeu')
+    itens = []
+    for l in out.splitlines():
+        p = l.split()
+        if len(p) == 3 and '.' in p[0] and not l.startswith(' '):
+            itens.append((p[0].rsplit('.', 1)[0], '', p[1]))
+    return itens
+
+
+def checa_pacman():
+    cmd = ['checkupdates'] if shutil.which('checkupdates') else ['pacman', '-Qu']
+    _, out, _ = _sai(cmd, 300, ENV_C)
+    return [m.groups() for m in re.finditer(r'^(\S+) (\S+) -> (\S+)', out, re.M)]
+
+
+def checa_aur(prog):
+    _, out, _ = _sai([prog, '-Qua'], 300, ENV_C)
+    return [m.groups() for m in re.finditer(r'^(\S+) (\S+) -> (\S+)', out, re.M)]
+
+
+def checa_zypper():
+    _, out, _ = _sai(['zypper', '-q', 'list-updates'], 300, ENV_C)
+    linhas = [[c.strip() for c in l.split('|')] for l in out.splitlines() if l.startswith('v ')]
+    return [(c[2], c[3], c[4]) for c in linhas if len(c) >= 5]
+
+
+def checa_flatpak():
+    _, out, _ = _sai(['flatpak', 'remote-ls', '--updates', '--columns=application,version'], 180, ENV_C)
+    return [(p[0], '', p[1] if len(p) > 1 else '') for p in (l.split('\t') for l in out.splitlines()) if p[0].strip()]
+
+
+def checa_snap():
+    _, out, err = _sai(['snap', 'refresh', '--list'], 180, ENV_C)
+    linhas = (out + err).splitlines()
+    if not linhas or 'up to date' in (out + err):
+        return []
+    return [(p[0], '', p[1]) for p in (l.split() for l in linhas[1:]) if len(p) >= 2]
+
+
+def checa_node():
+    _, out, _ = _sai(['node', '--version'])
+    atual = out.strip()
+    indice = _json_web('https://nodejs.org/dist/index.json') or []
+    lts = [v for v in indice if v.get('lts')]
+    if not atual or not lts:
+        raise RuntimeError('não consegui ver a versão do Node')
+    mesma = [v['version'] for v in lts if versao_tupla(v['version'])[:1] == versao_tupla(atual)[:1]]
+    alvo = mesma[0] if mesma else lts[0]['version']
+    itens = [('Node.js', atual, alvo)] if versao_tupla(alvo) > versao_tupla(atual) else []
+    nota = '' if versao_tupla(lts[0]['version'])[:1] == versao_tupla(atual)[:1] else f'LTS mais nova: {lts[0]["version"]}'
+    return itens, nota
+
+
+def dica_node():
+    if shutil.which('fnm'):
+        return 'fnm install --lts'
+    if shutil.which('volta'):
+        return 'volta install node@lts'
+    if os.environ.get('NVM_DIR') or os.environ.get('NVM_HOME'):
+        return 'nvm install --lts'
+    if os.name == 'nt' and shutil.which('winget'):
+        return 'winget upgrade OpenJS.NodeJS.LTS'
+    if shutil.which('brew'):
+        return 'brew upgrade node'
+    return 'baixe a versão LTS em nodejs.org'
+
+
+def checa_rustup():
+    _, out, _ = _sai(['rustup', 'check'], 120)
+    return [m.groups() for m in re.finditer(r'^(\S+) - Update available : (\S+).*?-> (\S+)', out, re.M)]
+
+
+def checa_deno():
+    _, out, _ = _sai(['deno', '--version'])
+    atual = re.search(r'deno (\S+)', out)
+    r = busca('https://dl.deno.land/release-latest.txt', tempo=15)
+    novo = r['corpo'].decode('utf-8', 'replace').strip().lstrip('v') if r['status'] == 200 else ''
+    if not atual or not novo:
+        raise RuntimeError('não consegui ver a versão do Deno')
+    return [('Deno', atual.group(1), novo)] if versao_tupla(novo) > versao_tupla(atual.group(1)) else []
+
+
+def checa_bun():
+    _, out, _ = _sai(['bun', '--version'])
+    novo = (_json_web('https://registry.npmjs.org/bun/latest') or {}).get('version')
+    if not out.strip() or not novo:
+        raise RuntimeError('não consegui ver a versão do Bun')
+    return [('Bun', out.strip(), novo)] if versao_tupla(novo) > versao_tupla(out.strip()) else []
+
+
+def checa_npm():
+    _, out, _ = _sai(['npm', 'outdated', '-g', '--json'], 180)  # sai com 1 quando há o que atualizar
+    dados = json.loads(out or '{}')
+    return [(n, v.get('current', '?'), v.get('latest', '?')) for n, v in dados.items()
+            if v.get('latest') and v.get('current') != v.get('latest')]
+
+
+def checa_pnpm():
+    _, out, _ = _sai(['pnpm', 'outdated', '-g', '--format', 'json'], 180)
+    try:
+        dados = json.loads(out or '{}')
+    except ValueError:
+        return []
+    return [(n, v.get('current', '?'), v.get('latest', '?')) for n, v in dados.items() if v.get('latest')]
+
+
+def pip_gerenciado_pelo_sistema():
+    import sysconfig
+    if sys.prefix != getattr(sys, 'base_prefix', sys.prefix):
+        return False  # num venv o pip é seu
+    return Path(sysconfig.get_paths()['stdlib'], 'EXTERNALLY-MANAGED').exists()
+
+
+def checa_pip():
+    if pip_gerenciado_pelo_sistema():
+        return [], 'Python do sistema: quem atualiza é o gerenciador de pacotes (use pipx para ferramentas)'
+    # --not-required: só o que você instalou, não as dependências (atualizar dependência solta quebra quem depende dela)
+    cod, out, err = _sai([sys.executable, '-m', 'pip', 'list', '--outdated', '--not-required', '--format=json',
+                          '--disable-pip-version-check'], 240)
+    if cod != 0:
+        raise RuntimeError('o pip não respondeu' if 'No module named pip' not in err else 'pip não instalado')
+    return [(p['name'], p['version'], p['latest_version']) for p in json.loads(out or '[]')]
+
+
+def checa_pipx():
+    _, out, _ = _sai(['pipx', 'list', '--json'], 120)
+    venvs = json.loads(out or '{}').get('venvs', {})
+    pares = [(v['metadata']['main_package']['package'], v['metadata']['main_package']['package_version'])
+             for v in venvs.values() if v.get('metadata', {}).get('main_package')]
+    return _pypi_varios(pares)
+
+
+def checa_uv():
+    _, out, _ = _sai(['uv', 'tool', 'list'], 60)
+    return _pypi_varios(re.findall(r'^(\S+) v(\S+)', out, re.M))
+
+
+def checa_cargo():
+    _, out, _ = _sai(['cargo', 'install-update', '-l'], 300)
+    return [(p[0], p[1], p[2]) for p in (l.split() for l in out.splitlines()) if len(p) >= 4 and p[3] == 'Yes']
+
+
+def checa_gh():
+    _, out, _ = _sai(['gh', 'extension', 'list'], 60)
+    n = len([l for l in out.splitlines() if l.strip()])
+    if not n:
+        return []
+    return None, f'{pl(n, "extensão", "extensões")}; o gh só sabe se há versão nova ao atualizar'
+
+
+def _extensoes(editor):
+    _, out, _ = _sai([shutil.which(editor), '--list-extensions', '--show-versions'], 120)
+    return [tuple(l.strip().rsplit('@', 1)) for l in out.splitlines() if '@' in l]
+
+
+def _ultima_marketplace(ids):
+    # a mesma consulta que o VS Code faz; flags 0x11 = versões + propriedades (para pular as pré-lançamento)
+    plataforma = {'win32': 'win32', 'darwin': 'darwin', 'linux': 'linux'}.get(sys.platform, sys.platform)
+    ultimas = {}
+    for i in range(0, len(ids), 25):
+        criterios = [{'filterType': 8, 'value': 'Microsoft.VisualStudio.Code'}] + [{'filterType': 7, 'value': x} for x in ids[i:i + 25]]
+        corpo = json.dumps({'filters': [{'criteria': criterios,
+                                         'pageSize': 25}], 'flags': 0x11})
+        arq = _arquivo_tmp('.json')
+        arq.write_text(corpo, encoding='utf-8')
+        try:
+            r = roda(['curl', '-sS', '--max-time', '40', '-H', 'Accept: application/json;api-version=3.0-preview.1',
+                      '-H', 'Content-Type: application/json', '--data-binary', f'@{arq}',
+                      'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery'], tempo=60)
+        finally:
+            arq.unlink()
+        try:
+            exts = json.loads(r.stdout)['results'][0]['extensions']
+        except (ValueError, KeyError, IndexError):
+            continue
+        for e in exts:
+            ident = f'{e["publisher"]["publisherName"]}.{e["extensionName"]}'.lower()
+            for v in e.get('versions', []):
+                props = {p['key']: p['value'] for p in v.get('properties', [])}
+                alvo = v.get('targetPlatform')
+                if props.get('Microsoft.VisualStudio.Code.PreRelease') == 'true':
+                    continue
+                if alvo and not alvo.startswith(plataforma) and alvo not in ('universal', 'web'):
+                    continue
+                ultimas[ident] = v['version']
+                break
+    return ultimas
+
+
+def _ultima_openvsx(ident):
+    ns, _, nome = ident.partition('.')
+    return (_json_web(f'https://open-vsx.org/api/{quote(ns)}/{quote(nome)}') or {}).get('version')
+
+
+def checa_editor(editor, loja):
+    exts = _extensoes(editor)
+    if not exts:
+        return []
+    if loja == 'ms':
+        ultimas = _ultima_marketplace([i for i, _ in exts])
+    else:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            ultimas = dict(zip([i.lower() for i, _ in exts], ex.map(_ultima_openvsx, [i for i, _ in exts])))
+    return [(i, v, ultimas[i.lower()]) for i, v in exts
+            if ultimas.get(i.lower()) and versao_tupla(ultimas[i.lower()]) > versao_tupla(v)]
+
+
+def _cmds_editor(editor):
+    return lambda itens: [[shutil.which(editor), '--install-extension', i, '--force'] for i, _, _ in itens]
+
+
+def fontes_do_pc():
+    """O que existe nesta máquina, na ordem em que aparece."""
+    win, mac, linux = os.name == 'nt', sys.platform == 'darwin', sys.platform.startswith('linux')
+    tem = shutil.which
+    F = []
+
+    def f(id_, grupo, nome, checa, comandos, sudo=False, admin=False, so_lista=False, dica=''):
+        F.append({'id': id_, 'grupo': grupo, 'nome': nome, 'checa': checa, 'comandos': comandos, 'sudo': sudo,
+                  'admin': admin, 'so_lista': so_lista, 'dica': dica})
+
+    if win and tem('winget'):
+        f('winget', 'sistema', 'winget', checa_winget,
+          [['winget', 'upgrade', '--all', '--silent', '--accept-package-agreements', '--accept-source-agreements',
+            '--disable-interactivity']])
+    if win and tem('choco'):
+        f('choco', 'sistema', 'Chocolatey', checa_choco, [['choco', 'upgrade', 'all', '-y', '--no-progress']], admin=True)
+    if win and tem('scoop'):
+        f('scoop', 'sistema', 'Scoop', checa_scoop, [[tem('scoop'), 'update'], [tem('scoop'), 'update', '*']])
+    if tem('brew'):
+        f('brew', 'sistema', 'Homebrew', checa_brew, [['brew', 'upgrade']])
+    if mac and tem('mas'):
+        f('mas', 'sistema', 'App Store', checa_mas, [['mas', 'upgrade']])
+    if mac and tem('softwareupdate'):
+        f('softwareupdate', 'sistema', 'macOS', checa_softwareupdate, [], so_lista=True,
+          dica='Ajustes do Sistema > Geral > Atualização de Software')
+    if linux and tem('apt-get') and tem('apt'):
+        f('apt', 'sistema', 'apt', checa_apt, [['apt-get', 'update'], ['env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get',
+                                                                        '-y', 'upgrade']], sudo=True)
+    if linux and tem('dnf'):
+        f('dnf', 'sistema', 'dnf', checa_dnf, [['dnf', '-y', 'upgrade']], sudo=True)
+    if linux and tem('pacman'):
+        f('pacman', 'sistema', 'pacman', checa_pacman, [['pacman', '-Syu', '--noconfirm']], sudo=True)
+    for aur in ('paru', 'yay'):
+        if linux and tem(aur):
+            f(aur, 'sistema', f'AUR ({aur})', lambda a=aur: checa_aur(a), [[aur, '-Sua', '--noconfirm']])
+            break
+    if linux and tem('zypper'):
+        f('zypper', 'sistema', 'zypper', checa_zypper, [['zypper', '-n', 'update']], sudo=True)
+    if linux and tem('flatpak'):
+        f('flatpak', 'sistema', 'Flatpak', checa_flatpak, [['flatpak', 'update', '-y', '--noninteractive']])
+    if linux and tem('snap'):
+        f('snap', 'sistema', 'Snap', checa_snap, [['snap', 'refresh']], sudo=True)
+
+    if tem('node'):
+        f('node', 'linguagens', 'Node.js', checa_node, [], so_lista=True, dica=dica_node())
+    if tem('rustup'):
+        f('rustup', 'linguagens', 'Rust', checa_rustup, [['rustup', 'update']])
+    if tem('deno'):
+        f('deno', 'linguagens', 'Deno', checa_deno, [['deno', 'upgrade']])
+    if tem('bun'):
+        f('bun', 'linguagens', 'Bun', checa_bun, [['bun', 'upgrade']])
+
+    if tem('npm'):
+        f('npm', 'pacotes', 'npm (globais)', checa_npm,
+          lambda itens: [['npm', 'install', '-g'] + [f'{n}@latest' for n, _, _ in itens]])
+    if tem('pnpm'):
+        f('pnpm', 'pacotes', 'pnpm (globais)', checa_pnpm, [['pnpm', 'update', '-g', '--latest']])
+    f('pip', 'pacotes', 'pip', checa_pip,
+      lambda itens: [[sys.executable, '-m', 'pip', 'install', '-U', '--disable-pip-version-check'] + [n for n, _, _ in itens]])
+    if tem('pipx'):
+        f('pipx', 'pacotes', 'pipx', checa_pipx, [['pipx', 'upgrade-all']])
+    if tem('uv'):
+        f('uv', 'pacotes', 'uv (ferramentas)', checa_uv, [['uv', 'tool', 'upgrade', '--all']])
+    if tem('cargo-install-update'):
+        f('cargo', 'pacotes', 'cargo (binários)', checa_cargo, [['cargo', 'install-update', '-a']])
+    if tem('gh'):
+        f('gh', 'pacotes', 'extensões do gh', checa_gh, [['gh', 'extension', 'upgrade', '--all']])
+
+    for editor, nome, loja in (('code', 'VS Code', 'ms'), ('code-insiders', 'VS Code Insiders', 'ms'),
+                               ('codium', 'VSCodium', 'ovsx'), ('cursor', 'Cursor', 'ovsx')):
+        if tem(editor):
+            f(editor, 'editores', nome, lambda e=editor, l=loja: checa_editor(e, l), _cmds_editor(editor))
+    return F
+
+
+def eh_admin():
+    if os.name == 'nt':
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except (AttributeError, OSError):
+            return False
+    return hasattr(os, 'geteuid') and os.geteuid() == 0
+
+
+def _verifica(fonte):
+    try:
+        res = fonte['checa']()
+    except Exception as e:  # um gerenciador quebrado não pode derrubar os outros
+        return {'itens': None, 'nota': '', 'erro': corta(str(e) or type(e).__name__, 70)}
+    nota = ''
+    if isinstance(res, tuple):
+        res, nota = res
+    return {'itens': res, 'nota': nota, 'erro': None}
+
+
+def executa_vivo(cmd, log, pr, env=None):
+    """Roda mostrando a última linha no progresso e guardando tudo no log."""
+    log.write(f'\n$ {" ".join(str(c) for c in cmd)}\n')
+    log.flush()
+    try:
+        p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, env=env)
+    except OSError as e:
+        log.write(f'{e}\n')
+        return 127, str(e)
+    ultima = ''
+    try:
+        while True:
+            bloco = p.stdout.read1(4096)
+            if not bloco:
+                break
+            txt = texto(bloco)
+            log.write(txt.replace('\r\n', '\n'))
+            ultimas = [l.strip() for l in re.split(r'[\r\n]', txt) if l.strip()]
+            if ultimas:
+                ultima = ultimas[-1]
+                if pr:
+                    pr.atual = ultima
+        return p.wait(), ultima
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+def ferramenta_atualizar(t, args):
+    escolha = {x.strip().lower() for x in (args.so or '').split(',') if x.strip()}
+    pular = {x.strip().lower() for x in (args.pular or '').split(',') if x.strip()}
+    fontes = [f for f in fontes_do_pc() if (not escolha or f['id'] in escolha or f['grupo'] in escolha)
+              and f['id'] not in pular and f['grupo'] not in pular]
+    if not fontes:
+        t.aviso('nenhum gerenciador encontrado' + (' com esse filtro.' if escolha or pular else '.'))
+        return 1
+    t.prompt('atualizar', ' · '.join(f['id'] for f in fontes))
+    with Progresso(t, len(fontes), 'verificando') as pr:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futuros = {ex.submit(_verifica, f): f for f in fontes}
+            for fut in as_completed(futuros):
+                futuros[fut].update(fut.result())
+                pr.avanca(futuros[fut]['nome'])
+
+    admin = eh_admin()
+    rel = Relatorio('atualizar')
+    candidatas = []
+    for grupo, titulo in GRUPOS_ATUALIZAR:
+        do_grupo = [f for f in fontes if f['grupo'] == grupo]
+        if not do_grupo:
+            continue
+        t.escreve()
+        t.titulo(titulo)
+        for f in do_grupo:
+            itens = f['itens']
+            if f['erro']:
+                t.item('✗', 'vermelho', f['nome'], t.p(f['erro'], 'vermelho'), recuo=4)
+                rel.add(f'{f["nome"]}: erro — {f["erro"]}')
+                continue
+            if itens is None:
+                t.item('·', 'azul', f['nome'], t.p('atualiza sem conferir antes', 'apagado'), recuo=4)
+                if f['nota']:
+                    t.nota(corta(f['nota'], t.largura - 9), 8)
+                candidatas.append(f)
+                rel.add(f'{f["nome"]}: {f["nota"]}')
+                continue
+            if not itens:
+                t.item('✓', 'verde', f['nome'], t.p('em dia', 'apagado'), recuo=4)
+                if f['nota']:
+                    t.nota(corta(f['nota'], t.largura - 9), 8)
+                rel.add(f'{f["nome"]}: em dia' + (f' ({f["nota"]})' if f['nota'] else ''))
+                continue
+            n = len(itens)
+            t.item('●', 'amarelo', f['nome'], t.p(pl(n, 'atualização', 'atualizações'), 'amarelo'), recuo=4)
+            mostrar = itens if args.tudo else itens[:4]
+            for nome, atual, novo in mostrar:
+                seta = f'{atual} → {novo}' if atual else f'→ {novo}'
+                major = subiu_major(atual, novo)
+                linha = f'{corta(nome, max(10, t.largura - 12 - len(seta) - (8 if major else 0)))}  {seta}'
+                t.escreve(' ' * 8 + t.p(linha, 'sub') + (t.p(' (major)', 'amarelo') if major else ''))
+            if len(itens) > len(mostrar):
+                t.nota(f'e mais {len(itens) - len(mostrar)} (veja todas com --tudo)', 8)
+            if f['nota']:
+                t.nota(corta(f['nota'], t.largura - 9), 8)
+            rel.add(f'{f["nome"]}: {n} atualizações', *[f'  {a} {b} -> {c}' for a, b, c in itens])
+            if f['so_lista']:
+                t.nota(corta(f'atualize com: {f["dica"]}', t.largura - 9), 8)
+            elif f['admin'] and not admin:
+                t.nota('precisa do terminal aberto como administrador', 8)
+            else:
+                candidatas.append(f)
+    if any(f['itens'] and subiu_major(*x[1:]) for f in candidatas for x in f['itens'] or []):
+        t.escreve()
+        t.paragrafo('(major) = versão nova principal: pode mudar comandos ou opções. Leia as notas da versão '
+                    'se algo deixar de funcionar.', 4, 'apagado')
+    t.escreve()
+    arq_rel = rel.salva()
+    t.nota(f'    relatório: {caminho_curto(arq_rel, t.largura - 17)}', 0)
+
+    pendentes = [f for f in candidatas if f['itens'] or f['itens'] is None]
+    com_algo = [f for f in pendentes if f['itens']]
+    if not com_algo and not any(f['itens'] is None for f in pendentes):
+        t.escreve()
+        t.ok('tudo em dia.')
+        return 0
+    if args.teste or args.listar:
+        t.escreve()
+        t.nota('    modo teste: nada foi atualizado.', 0)
+        return 0
+
+    # escolha
+    t.escreve()
+    t.titulo('o que atualizar')
+    for i, f in enumerate(pendentes, 1):
+        extra = pl(len(f['itens']), 'atualização', 'atualizações') if f['itens'] else 'sem conferir antes'
+        nome = corta(f['nome'], 18)
+        t.escreve(f'    {t.p(f"{i:>2}", "verde", True)}  {t.p(f"{nome:<18}", "texto")} {t.p(extra, "sub")}'
+                  + (t.p('  sudo', 'pessego') if f['sudo'] and not admin else ''))
+    if not args.sim and not t.interativo:
+        t.nota('    sem terminal para perguntar: rode de novo com --sim para atualizar tudo.', 0)
+        return 0
+    escolhidas = pendentes
+    if not args.sim:
+        t.escreve()
+        t.paragrafo('Enter = todos · números separados por espaço · 0 = nenhum', 2, 'apagado')
+        resp = t.pergunta('atualizar').strip().lower()
+        if resp in ('0', 'n', 'nao', 'não', 'nenhum'):
+            return 0
+        nums = [int(x) for x in re.findall(r'\d+', resp) if 0 < int(x) <= len(pendentes)]
+        if nums:
+            escolhidas = [pendentes[n - 1] for n in dict.fromkeys(nums)]
+
+    # sudo pede a senha uma vez, antes, com o terminal livre; depois os comandos rodam com sudo -n
+    usa_sudo = os.name != 'nt' and not admin and any(f['sudo'] for f in escolhidas)
+    if usa_sudo:
+        t.escreve()
+        t.paragrafo('o sudo vai pedir a sua senha uma vez (para ' + ', '.join(f['nome'] for f in escolhidas if f['sudo']) + ')', 2, 'apagado')
+        if subprocess.run(['sudo', '-v']).returncode != 0:
+            t.aviso('sem a senha, pulo os que precisam de sudo.')
+            escolhidas = [f for f in escolhidas if not f['sudo']]
+    pasta = CASA / 'atualizar'
+    pasta.mkdir(parents=True, exist_ok=True)
+    arq_log = pasta / f'log-{carimbo()}.txt'
+    resultados = []
+    t.escreve()
+    with open(arq_log, 'w', encoding='utf-8') as log, Progresso(t, len(escolhidas), 'atualizando') as pr:
+        for f in escolhidas:
+            pr.atual = f['nome']
+            cmds = f['comandos'](f['itens'] or []) if callable(f['comandos']) else f['comandos']
+            inicio, cod, ultima = time.time(), 0, ''
+            for cmd in cmds:
+                if f['sudo'] and not admin:
+                    cmd = ['sudo', '-n'] + cmd
+                cod, ultima = executa_vivo(cmd, log, pr, env=ENV_C if f['grupo'] == 'sistema' and os.name != 'nt' else None)
+                if cod != 0:
+                    break
+            resultados.append((f, cod, time.time() - inicio, ultima))
+            pr.avanca(f['nome'])
+    t.titulo('resultado')
+    for f, cod, dur, ultima in resultados:
+        if cod == 0:
+            t.item('✓', 'verde', f['nome'], t.p(f'{pl(len(f["itens"]), "pacote") if f["itens"] else "feito"} · {dur:.0f} s', 'sub'), recuo=4)
+        else:
+            # winget devolve código de erro quando um pacote só falha e os outros vão
+            t.item('✗', 'vermelho', f['nome'], t.p(f'saiu com código {cod}', 'vermelho'), recuo=4)
+            if ultima:
+                t.nota(corta(ultima, t.largura - 9), 8)
+    t.escreve()
+    t.nota(f'    log: {caminho_curto(arq_log, t.largura - 11)}', 0)
+    if Path('/var/run/reboot-required').exists():
+        t.aviso('o sistema pede para reiniciar o computador.')
+    if any(r[1] != 0 for r in resultados):
+        t.paragrafo('Rode de novo para ver o que ficou pendente; no log está a saída completa de cada um.', 4, 'apagado')
+        return 1
+    return 0
+
+
+# ███████████████████████████████████████████████████████████████████████████
+#
+#   PARTE 3 · MENU E ENTRADA
+#   as duas partes num menu só, e os comandos de linha
+#
+# ███████████████████████████████████████████████████████████████████████████
+
+
+GRUPOS = [
+    ('seus repositórios no GitHub', 'repos', [
+        ('segredos', 'segredos.sh', 'chaves e senhas vazadas', 'ferramenta_segredos'),
+        ('branches', 'branches.sh', 'apaga as já mescladas', 'ferramenta_branches'),
+        ('demos', 'demos.sh', 'os sites estão no ar?', 'ferramenta_demos'),
+        ('backup', 'backup.sh', 'cópia da branch principal', 'ferramenta_backup'),
+        ('deps', 'deps.sh', 'falhas e versões velhas', 'ferramenta_deps'),
+        ('coautores', 'coautores.sh', 'tira a coautoria do Claude', 'ferramenta_coautores'),
+    ]),
+    ('seu computador e seus sites', 'dev', [
+        ('faxina', 'faxina.sh', 'libera espaço em disco', 'ferramenta_faxina'),
+        ('portas', 'portas.sh', 'quem usa cada porta', 'ferramenta_portas'),
+        ('raiox', 'raiox.sh', 'acessibilidade, SEO e mais', 'ferramenta_raiox'),
+        ('peso', 'peso.sh', 'o que a página carrega', 'ferramenta_peso'),
+        ('atualizar', 'atualizar.sh', 'atualiza tudo do PC', 'ferramenta_atualizar'),
+    ]),
+]
+FERRAMENTAS = [(cmd, arq, desc, funcao, grupo) for _, grupo, itens in GRUPOS for cmd, arq, desc, funcao in itens
+               if funcao in globals()]
+PRECISA = {'segredos': ('git', 'curl'), 'branches': ('curl',), 'demos': ('curl',), 'backup': ('git', 'curl'),
+           'deps': ('curl',), 'coautores': ('git', 'curl'), 'raiox': ('curl',), 'peso': ('curl',)}
+
+
+def _limpa(self):
+    if self.tty:
+        sys.stdout.write('\033[2J\033[H')
+
+
+def _espera(self, txt):
+    try:
+        input(self._adapta('  ' + self.p(txt, 'apagado') + ' '))
+    except EOFError:
+        pass
+
+
+Terminal.limpa = _limpa
+Terminal.espera = _espera
+
+
+def roda_ferramenta(ctx, args):
+    cmd, arquivo, desc, funcao, grupo = next(f for f in FERRAMENTAS if f[0] == args.comando)
+    t = ctx.t
+    for prog in PRECISA.get(cmd, ()):
+        if not shutil.which(prog):
+            t.erro(f'Essa ferramenta precisa do {prog} instalado.')
+            return 1
+    t.aba(arquivo, desc)
     inicio = time.time()
-    EXECUTA[cmd](ctx)
+    if grupo == 'repos':
+        ctx.args = args
+        cod = globals()[funcao](ctx)
+    else:
+        cod = globals()[funcao](t, args)
     ctx.estado[cmd] = agora_iso()
     salva_estado(ctx.estado)
-    ctx.t.nota(f'concluído em {time.time() - inicio:.0f} s', 4)
+    t.nota(f'concluído em {time.time() - inicio:.0f} s', 4)
+    return cod or 0
 
 
-def menu(ctx):
+def monta_parser():
+    comum = argparse.ArgumentParser(add_help=False)
+    comum.add_argument('--ascii', action='store_true', help='só caracteres simples (terminal que mostra quadradinhos)')
+    comum.add_argument('--sem-cor', action='store_true', help='sem cores')
+    comum.add_argument('--teste', action='store_true', help='só mostra, não altera nada')
+    comum.add_argument('--sim', action='store_true', help='não pede confirmação')
+    # as mesmas opções depois do comando; SUPPRESS para não apagarem as que vieram antes dele
+    depois = argparse.ArgumentParser(add_help=False)
+    for nome in ('--ascii', '--sem-cor', '--teste', '--sim'):
+        depois.add_argument(nome, action='store_true', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    de_repos = argparse.ArgumentParser(add_help=False)
+    de_repos.add_argument('repos', nargs='*', help='só esses repositórios (padrão: todos os seus)')
+    de_repos.add_argument('--forks', action='store_true', help='inclui forks')
+    de_repos.add_argument('--sem-login', action='store_true', help='não usa token; só o acesso que o git já tem')
+
+    p = argparse.ArgumentParser(prog='ferramentas-git', parents=[comum],
+                                description='Ferramentas para os seus repositórios, o seu computador e os seus sites. '
+                                            'Sem comando, abre o menu.')
+    sub = p.add_subparsers(dest='comando', metavar='comando')
+    sub.add_parser('segredos', parents=[depois, de_repos], help='[GitHub] caça chaves e senhas no histórico')
+    b = sub.add_parser('branches', parents=[depois, de_repos], help='[GitHub] apaga branches já mescladas')
+    b.add_argument('--restaurar', metavar='ARQUIVO', help='recria as branches apagadas numa rodada anterior')
+    sub.add_parser('demos', parents=[depois, de_repos], help='[GitHub] confere se os sites das demos estão no ar')
+    bk = sub.add_parser('backup', parents=[depois, de_repos], help='[GitHub] baixa/atualiza a branch principal de todos')
+    bk.add_argument('--destino', help='pasta do backup (padrão ~/backup-github; ele lembra da última)')
+    sub.add_parser('deps', parents=[depois, de_repos], help='[GitHub] vulnerabilidades e dependências velhas')
+    sub.add_parser('coautores', parents=[depois, de_repos], help='[GitHub] tira a coautoria do Claude do histórico')
+
+    f = sub.add_parser('faxina', parents=[depois], help='[PC] libera espaço de projetos parados')
+    f.add_argument('pastas', nargs='*', help='onde procurar (padrão: sua pasta pessoal)')
+    f.add_argument('--dias', type=int, default=30, help='dias sem mexer para contar como parado (padrão 30)')
+    po = sub.add_parser('portas', parents=[depois], help='[PC] quem está usando cada porta')
+    po.add_argument('porta', nargs='?', type=int, help='mostra só essa porta e oferece encerrar')
+    po.add_argument('--matar', action='store_true', help='encerra o processo da porta (pede confirmação)')
+    po.add_argument('--livre', type=int, nargs='?', const=3000, metavar='DESDE',
+                    help='próxima porta livre a partir de DESDE (padrão 3000)')
+    po.add_argument('--todas', action='store_true', help='inclui as portas altas do sistema')
+    rx = sub.add_parser('raiox', parents=[depois], help='[site] acessibilidade, SEO, desempenho e segurança')
+    rx.add_argument('url', help='endereço do site (ex.: kessleru.com.br ou localhost:5173)')
+    rx.add_argument('--desktop', action='store_true', help='Lighthouse como computador (padrão: celular)')
+    rx.add_argument('--rapido', action='store_true', help='sem o Lighthouse (só a análise própria, em segundos)')
+    rx.add_argument('--paginas', type=int, default=0, metavar='N', help='analisa também N páginas internas')
+    rx.add_argument('--tudo', action='store_true', help='mostra também o que passou e as sugestões')
+    rx.add_argument('--json', metavar='ARQUIVO', help='salva o resultado completo em JSON')
+    rx.add_argument('--copiar', action='store_true', help='copia o resumo para a IA na área de transferência')
+    if 'ferramenta_peso' in globals():
+        pe = sub.add_parser('peso', parents=[depois], help='[site] o que cada página carrega e o que mais pesa')
+        pe.add_argument('url', help='endereço do site')
+        pe.add_argument('--desktop', action='store_true', help='mede como computador (padrão: celular)')
+        pe.add_argument('--rapido', action='store_true', help='sem o Lighthouse (medição própria, em segundos)')
+        pe.add_argument('--paginas', type=int, default=0, metavar='N', help='mede também N páginas internas')
+        pe.add_argument('--copiar', action='store_true', help='copia o resumo para a IA na área de transferência')
+    if 'ferramenta_atualizar' in globals():
+        at = sub.add_parser('atualizar', parents=[depois], help='[PC] atualiza sistema, linguagens, pacotes e extensões')
+        at.add_argument('--so', metavar='LISTA', help='só esses grupos ou ferramentas (ex.: npm,pip,winget)')
+        at.add_argument('--pular', metavar='LISTA', help='menos esses grupos ou ferramentas (ex.: pip,editores)')
+        at.add_argument('--listar', action='store_true', help='só lista o que tem atualização (igual a --teste)')
+        at.add_argument('--tudo', action='store_true', help='mostra todos os pacotes, não só os quatro primeiros')
+    return p
+
+
+def menu(ctx, parser, args):
     t = ctx.t
     while True:
         t.limpa()
         t.cabecalho('início')
         t.titulo('Olá! O que vamos fazer hoje?')
+        num, por_numero = 0, {}
+        for titulo_grupo, grupo, _ in GRUPOS:
+            itens = [f for f in FERRAMENTAS if f[4] == grupo]
+            if not itens:
+                continue
+            t.escreve()
+            t.escreve('  ' + t.p(f'─ {titulo_grupo} ', 'apagado') + t.p('─' * max(0, t.largura - len(titulo_grupo) - 6), 'fundo'))
+            for cmd, _, desc, _, _ in itens:
+                num += 1
+                por_numero[str(num)] = cmd
+                quando = ha_quanto_iso(ctx.estado.get(cmd, ''))
+                esq = f'  {t.p(f"{num:>2}", "verde", True)}  {t.p(f"{cmd:<10}", "texto")} {t.p(corta(desc, t.largura - 17), "sub")}'
+                if quando and vlen(esq) + len(quando) + 2 <= t.largura:
+                    esq += ' ' * (t.largura - vlen(esq) - len(quando)) + t.p(quando, 'apagado')
+                t.escreve(esq)
         t.escreve()
-        for i, (cmd, _, desc) in enumerate(FERRAMENTAS, 1):
-            quando = ha_quanto(ctx.estado.get(cmd, ''))
-            esq = f'  {t.p(str(i), "verde", True)}  {t.p(f"{cmd:<10}", "texto")} {t.p(corta(desc, t.largura - 16), "sub")}'
-            if quando and vlen(esq) + len(quando) + 2 <= t.largura:
-                esq += ' ' * (t.largura - vlen(esq) - len(quando)) + t.p(quando, 'apagado')
-            t.escreve(esq)
-        t.escreve(f'  {t.p("0", "verde", True)}  {t.p("sair", "apagado")}')
+        t.escreve(f'  {t.p(" 0", "verde", True)}  {t.p("sair", "apagado")}')
         t.escreve()
         escolha = t.pergunta('início').strip().lower()
-        if escolha in ('0', 'q', 'sair', ''):
-            return
-        cmd = FERRAMENTAS[int(escolha) - 1][0] if escolha.isdigit() and 0 < int(escolha) <= len(FERRAMENTAS) else (
-            escolha if escolha in EXECUTA else None)
+        if escolha in ('', '0', 'q', 'sair'):
+            return 0
+        cmd = por_numero.get(escolha) or (escolha if escolha in [f[0] for f in FERRAMENTAS] else None)
         if not cmd:
             continue
+        grupo = next(f[4] for f in FERRAMENTAS if f[0] == cmd)
+        extra = []
         t.escreve()
-        t.nota('Enter = todos os repositórios, ou digite os nomes separados por espaço', 2)
-        ctx.args.repos = t.pergunta(f'{cmd}/repos').split()
-        if cmd in ('branches', 'coautores'):
-            t.nota('só simular primeiro, sem alterar nada? s = sim, Enter = não', 2)
-            ctx.args.teste = t.pergunta(f'{cmd}/simular').strip().lower() in ('s', 'sim')
-        roda_ferramenta(ctx, cmd)
+        if grupo == 'repos':
+            t.paragrafo('Enter = todos os repositórios, ou digite os nomes separados por espaço', 2, 'apagado')
+            extra = t.pergunta(f'{cmd}/repos').split()
+            if cmd in ('branches', 'coautores'):
+                t.paragrafo('só simular primeiro, sem alterar nada? s = sim, Enter = não', 2, 'apagado')
+                if t.pergunta(f'{cmd}/simular').strip().lower() in ('s', 'sim'):
+                    extra.append('--teste')
+        elif cmd in ('raiox', 'peso'):
+            t.paragrafo('endereço do site (ex.: kessleru.com.br ou localhost:5173); Enter = voltar', 2, 'apagado')
+            endereco = t.pergunta(f'{cmd}/url').strip()
+            if not endereco:
+                continue
+            extra = [endereco]
+        sub_args = parser.parse_args([cmd] + extra)
+        for k in ('ascii', 'sem_cor'):
+            setattr(sub_args, k, getattr(args, k))
+        roda_ferramenta(ctx, sub_args)
         t.escreve()
         t.espera('Enter para voltar ao menu')
 
 
 def main():
-    p = argparse.ArgumentParser(prog='ferramentas-git', description='Ferramentas para todos os seus repositórios do GitHub.')
-    p.add_argument('comando', nargs='?', choices=list(EXECUTA), help='sem comando, abre o menu')
-    p.add_argument('repos', nargs='*', help='só esses repositórios (padrão: todos)')
-    p.add_argument('--teste', action='store_true', help='não altera nada no GitHub')
-    p.add_argument('--sim', action='store_true', help='não pede confirmação')
-    p.add_argument('--destino', help='backup: pasta de destino (padrão ~/backup-github)')
-    p.add_argument('--forks', action='store_true', help='inclui forks')
-    p.add_argument('--restaurar', metavar='ARQUIVO', help='branches: recria as branches apagadas')
-    p.add_argument('--sem-login', action='store_true', help='não usa token; só o acesso que o git já tem')
-    p.add_argument('--ascii', action='store_true', help='só caracteres simples (terminal que mostra quadradinhos)')
-    p.add_argument('--sem-cor', action='store_true', help='sem cores')
-    args = p.parse_args()
-    t = Terminal(ascii_forcado=args.ascii, sem_cor=args.sem_cor)
+    parser = monta_parser()
+    args = parser.parse_args()
+    t = Terminal(args.ascii, args.sem_cor)
     ctx = Ctx(args, t)
-    for ferramenta in ('git', 'curl'):
-        if not shutil.which(ferramenta):
-            t.erro(f'Preciso do {ferramenta} instalado.')
-            return 1
     try:
         if args.comando:
             t.cabecalho(args.comando)
-            roda_ferramenta(ctx, args.comando)
-        else:
-            menu(ctx)
+            return roda_ferramenta(ctx, args)
+        return menu(ctx, parser, args)
     except KeyboardInterrupt:
         t.para_vivo()
         t.escreve()
         t.aviso('interrompido.')
         return 130
-    return 0
 
 
 if __name__ == '__main__':
