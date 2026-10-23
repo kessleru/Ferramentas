@@ -107,6 +107,8 @@ def roda(cmd, cwd=None, entrada=None, env=None, tempo=None):
         return subprocess.CompletedProcess(cmd, 124, e.stdout or b'', b'tempo esgotado')
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, 127, b'', f'{cmd[0]} não encontrado'.encode())
+    except OSError as e:
+        return subprocess.CompletedProcess(cmd, 126, b'', str(e).encode())
 
 
 def tamanho_pasta(p):
@@ -122,14 +124,18 @@ def tamanho_pasta(p):
 
 def carrega_estado():
     try:
-        return json.loads((CASA / 'estado.json').read_text(encoding='utf-8'))
+        estado = json.loads((CASA / 'estado.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
+    return estado if isinstance(estado, dict) else {}
 
 
 def salva_estado(estado):
-    CASA.mkdir(parents=True, exist_ok=True)
-    (CASA / 'estado.json').write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding='utf-8')
+    try:
+        CASA.mkdir(parents=True, exist_ok=True)
+        (CASA / 'estado.json').write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding='utf-8')
+    except OSError:
+        pass  # sem gravar o estado, o menu só não mostra "há quanto tempo"; a ferramenta já rodou
 
 
 # ═══════════════════════════════ núcleo: terminal ═══════════════════════════════
@@ -146,10 +152,12 @@ LOGO_SIMBOLO = [' ▄▀   █ ▀▄ ', '▀▄  ▄▀   ▄▀', '  ▀ ▀  
 LOGO_NOME = ['█ █ █▀▀ █▀▀ █▀▀ █   █▀▀ █▀▄ █ █',
              '█▀▄ █▀  ▀▀█ ▀▀█ █   █▀  █▀▄ █ █',
              '▀ ▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀']
-TROCA_SIMPLES = str.maketrans({'✓': '+', '✗': 'x', '↳': '>', '↻': '*', '↑': '^', '→': '->', '●': '•', '◆': '♦'})
+TROCA_SIMPLES = str.maketrans({'✓': '+', '✗': 'x', '↳': '>', '↻': '*', '↑': '^', '→': '->', '●': '•', '◆': '♦',
+                               '◇': '♦', '┌': '+', '└': '+', '›': '>'})
 TROCA_ASCII = str.maketrans({'✓': '+', '✗': 'x', '·': '.', '…': '...', '─': '-', '●': '*', '◆': '>', '■': '#',
                              '█': '#', '▀': '"', '▄': '_', '↳': '>', '↑': '^', '↻': '*', '→': '->', '—': '-',
-                             '•': '*', '♦': '>', '↓': 'v', '₂': '2', '🔒': '', '≈': '~', '×': 'x'})
+                             '•': '*', '♦': '>', '↓': 'v', '₂': '2', '🔒': '', '≈': '~', '×': 'x',
+                             '◇': '*', '│': '|', '┌': '+', '└': '+', '›': '>'})
 ANSI = re.compile(r'\033\[[0-9;]*m')
 
 
@@ -163,7 +171,28 @@ def corta(s, n):
 
 
 def corta_esq(s, n):
-    return s if len(s) <= n else '…' + s[-(n - 1):]
+    if len(s) <= n:
+        return s
+    return '…' + s[-(n - 1):] if n > 1 else '…'[:max(n, 0)]
+
+
+def corta_visivel(s, n):
+    """Corta um texto com cores em n caracteres visíveis, sem quebrar as sequências de cor."""
+    if vlen(s) <= n:
+        return s
+    saida, vistos, pos = [], 0, 0
+    for m in ANSI.finditer(s):
+        trecho = s[pos:m.start()]
+        if vistos + len(trecho) >= n:
+            saida.append(trecho[:max(0, n - vistos)])
+            vistos = n
+            break
+        saida.append(trecho + m.group())
+        vistos += len(trecho)
+        pos = m.end()
+    else:
+        saida.append(s[pos:][:max(0, n - vistos)])
+    return ''.join(saida) + '\033[0m'
 
 
 def caminho_curto(p, n=None):
@@ -211,7 +240,7 @@ class Terminal:
         termo = env.get('TERM', '')
         self.tty = sys.stdout.isatty() or mintty
         self.interativo = sys.stdin.isatty() or mintty
-        self.cor = (self.tty and not sem_cor and 'NO_COLOR' not in env and termo != 'dumb') or bool(env.get('FORCE_COLOR'))
+        self.cor = not sem_cor and ((self.tty and 'NO_COLOR' not in env and termo != 'dumb') or bool(env.get('FORCE_COLOR')))
         ct = env.get('COLORTERM', '').lower()
         if (ct in ('truecolor', '24bit') or 'WT_SESSION' in env or mintty
                 or env.get('TERM_PROGRAM') in ('vscode', 'iTerm.app', 'WezTerm', 'Hyper', 'ghostty')):
@@ -230,9 +259,12 @@ class Terminal:
             self.nivel = 'simples'
         else:
             self.nivel = 'pleno'
-        self.largura = max(36, min(shutil.get_terminal_size((72, 24)).columns - 1, 78))
+        # a guia lateral ocupa uma coluna a mais: o conteúdo é montado para `largura` e cabe na tela
+        self.largura = max(36, min(shutil.get_terminal_size((72, 24)).columns - 2, 78))
         self.trava = threading.RLock()
         self.vivo_txt = ''
+        self.guia = False
+        self._vazia = False
 
     def _adapta(self, txt):
         if self.nivel == 'pleno':
@@ -257,11 +289,22 @@ class Terminal:
         s = ('\033[1m' if negrito else '') + (self._cod(cor) if cor else '') + (self._cod(fundo, True) if fundo else '')
         return s + str(txt) + '\033[0m'
 
-    def escreve(self, txt=''):
+    def _com_guia(self, txt):
+        # dentro de um bloco, a linha ganha a guia lateral no lugar dos dois espaços do começo
+        if not self.guia:
+            return txt
+        return ' ' + self.p('│', 'superficie') + (' ' + txt[2:] if txt.startswith('  ') else ' ' + txt if txt else '')
+
+    def escreve(self, txt='', guia=True):
+        vazia = not ANSI.sub('', txt).strip()
+        if vazia and self._vazia:
+            return  # duas linhas em branco seguidas viram uma
+        self._vazia = vazia
+        linha = self._adapta(self._com_guia(txt) if guia else txt)
         with self.trava:
             if self.vivo_txt and self.tty:
                 sys.stdout.write('\r\033[2K')
-            sys.stdout.write(self._adapta(txt) + '\n')
+            sys.stdout.write(linha + '\n')
             if self.vivo_txt and self.tty:
                 sys.stdout.write(self.vivo_txt)
             sys.stdout.flush()
@@ -270,7 +313,8 @@ class Terminal:
         if not self.tty:
             return
         with self.trava:
-            self.vivo_txt = self._adapta(txt)
+            # linha viva mais larga que a tela quebra, e o \r só apaga o último pedaço: corta antes
+            self.vivo_txt = self._adapta(corta_visivel(self._com_guia(txt), self.largura + 1))
             sys.stdout.write('\r\033[2K' + self.vivo_txt)
             sys.stdout.flush()
 
@@ -281,34 +325,43 @@ class Terminal:
                 sys.stdout.flush()
             self.vivo_txt = ''
 
-    def cabecalho(self, caminho):
-        w = self.largura
-        bolas = ' '.join(self.p('●', c) for c in ('vermelho', 'amarelo', 'verde'))
-        titulo = 'ferramentas — Visual Studio Code' if w >= 60 else 'ferramentas'
-        self.escreve()
-        self.escreve(' ' + bolas + ' ' * max(2, (w - 6 - len(titulo)) // 2) + self.p(titulo, 'apagado'))
-        self.escreve(' ' + self.p('~', 'verde') + self.p(f'/{caminho}/', 'texto') + self.p('█', 'verde'))
-        self.escreve(' ' + self.p('─' * (w - 1), 'superficie'))
-        self.escreve()
-        if w >= 48 and self.nivel != 'ascii':
+    def logo(self):
+        self.escreve(guia=False)
+        if self.largura >= 46 and self.nivel != 'ascii':
             for s, n in zip(LOGO_SIMBOLO, LOGO_NOME):
-                self.escreve('  ' + self.p(s, 'texto') + '   ' + self.p(n, 'verde'))
+                self.escreve('  ' + self.p(s, 'texto') + '   ' + self.p(n, 'verde'), guia=False)
         else:
-            self.escreve('  ' + self.p('</>', 'texto', True) + '  ' + self.p('KESSLERU', 'verde', True))
+            self.escreve('  ' + self.p('</>', 'texto', True) + '  ' + self.p('KESSLERU', 'verde', True), guia=False)
+
+    def cabecalho(self, caminho):
+        """Abre um bloco: a primeira linha, com o nome da ferramenta, e a guia lateral daí para baixo."""
+        self.escreve(guia=False)
+        marca = self.p('┌', 'superficie')
+        nome = self.p(' ferramentas ', 'texto', True) if caminho == 'início' else (
+            self.p('ferramentas', 'apagado') + self.p(' › ', 'fundo') + self.p(f' {caminho} ', 'texto', True, fundo='fundo'))
+        self.escreve(' ' + marca + ' ' + nome, guia=False)
+        self.guia = True
         self.escreve()
+
+    def fim(self, txt=''):
+        """Fecha o bloco aberto pelo cabeçalho."""
+        if not self.guia:
+            return
+        self.para_vivo()
+        self.guia = False
+        self.escreve(' ' + self.p('└', 'superficie') + ' ' + self.p(txt, 'apagado'), guia=False)
 
     def titulo(self, txt):
-        self.escreve('  ' + self.p('>', 'verde', True) + ' ' + self.p(txt, 'texto', True))
+        self.escreve(' ' + self.p('◇', 'verde') + ' ' + self.p(txt, 'texto', True), guia=False)
 
     def aba(self, arquivo, descricao=''):
-        self.escreve()
-        extra = '  ' + self.p(corta(descricao, self.largura - len(arquivo) - 9), 'apagado') if descricao else ''
-        self.escreve('  ' + self.p(f' ◆ {arquivo} ', 'texto', fundo='fundo') + extra)
-        self.escreve('  ' + self.p('─' * (self.largura - 2), 'fundo'))
+        # a descrição da ferramenta logo abaixo do cabeçalho, discreta
+        if descricao:
+            self.escreve('  ' + self.p(corta(descricao, self.largura - 4), 'apagado'))
+            self.escreve()
 
     def prompt(self, pasta, txt):
-        self.escreve('  ' + self.p('~', 'verde') + self.p(f'/{pasta}/', 'sub') + ' '
-                     + self.p('>', 'verde') + ' ' + self.p(corta(txt, self.largura - len(pasta) - 8), 'texto'))
+        self.escreve('  ' + self.p(f'~/{pasta}', 'apagado') + '  ' + self.p(corta(txt, self.largura - len(pasta) - 6), 'texto'))
 
     def item(self, icone, cor, nome, detalhe='', recuo=2, cor_nome='texto'):
         w, d = self.largura, vlen(detalhe)
@@ -344,21 +397,29 @@ class Terminal:
         for linha in textwrap.wrap(txt, max(20, self.largura - recuo), break_on_hyphens=False):
             self.escreve(' ' * recuo + self.p(linha, cor))
 
+    def _mensagem(self, icone, cor_icone, txt, cor):
+        if vlen(txt) != len(txt):  # já vem colorido: não dá para quebrar sem estragar as cores
+            self.escreve('  ' + icone + ' ' + txt)
+            return
+        for i, linha in enumerate(textwrap.wrap(txt, max(20, self.largura - 4), break_on_hyphens=False) or ['']):
+            self.escreve(('  ' + icone if i == 0 else '   ') + ' ' + (self.p(linha, cor) if cor else linha))
+
     def ok(self, txt):
-        self.escreve('  ' + self.p('✓', 'verde') + ' ' + txt)
+        self._mensagem(self.p('✓', 'verde'), 'verde', txt, None)
 
     def aviso(self, txt):
-        self.escreve('  ' + self.p('!', 'amarelo', True) + ' ' + self.p(txt, 'amarelo'))
+        self._mensagem(self.p('!', 'amarelo', True), 'amarelo', txt, 'amarelo')
 
     def erro(self, txt):
-        self.escreve('  ' + self.p('✗', 'vermelho', True) + ' ' + self.p(txt, 'vermelho'))
+        self._mensagem(self.p('✗', 'vermelho', True), 'vermelho', txt, 'vermelho')
 
     def nota(self, txt, recuo=2):
         self.escreve(' ' * recuo + self.p(txt, 'apagado'))
 
     def pergunta(self, txt):
+        rotulo = self._com_guia('  ' + self.p(txt, 'sub') + ' ' + self.p('› ', 'verde'))
         try:
-            return input(self._adapta('  ' + self.p('~', 'verde') + self.p(f'/{txt}/', 'sub') + ' ' + self.p('> ', 'verde')))
+            return input(self._adapta(rotulo))
         except EOFError:
             return ''
 
@@ -437,8 +498,8 @@ def confirma(t, args, pergunta):
         t.aviso('Sem terminal para confirmar; use --sim para seguir sem perguntar.')
         return False
     t.escreve()
-    t.escreve('  ' + t.p(pergunta, 'amarelo'))
-    return t.pergunta('digite SIM').strip().lower() == 'sim'
+    t.escreve(' ' + t.p('◆', 'amarelo') + ' ' + t.p(pergunta, 'amarelo', True), guia=False)
+    return t.pergunta('digite SIM para confirmar').strip().lower() == 'sim'
 
 # ███████████████████████████████████████████████████████████████████████████
 #
@@ -1006,11 +1067,22 @@ def ferramenta_segredos(ctx):
 
 # ═══════════════════════════════ 2. branches ═══════════════════════════════
 
+# branches que vivem para sempre, mesmo iguais à principal: deploy, homologação, Pages
+BRANCHES_FIXAS = re.compile(r'^(develop|development|dev|staging|stage|homolog|homologacao|production|prod|'
+                            r'release(s)?([/-].*)?|gh-pages|pages|docs)$', re.I)
+
+
 def analisa_branches(gh, r):
     full, padrao = r['full_name'], r['default_branch']
     branches = [b for b in gh.paginas(f'/repos/{full}/branches') if b['name'] != padrao]
     if not branches:
         return []
+    fonte_pages = None
+    if r.get('has_pages'):
+        try:
+            fonte_pages = ((gh.json(f'/repos/{full}/pages') or {}).get('source') or {}).get('branch')
+        except ErroAPI:
+            pass
     abertos, mesclados = set(), {}
     for p in gh.paginas(f'/repos/{full}/pulls?state=open'):
         if (p.get('head') or {}).get('repo') and p['head']['repo']['full_name'] == full:
@@ -1024,6 +1096,10 @@ def analisa_branches(gh, r):
         item = {'nome': nome, 'sha': sha, 'apagar': False}
         if b.get('protected'):
             item['motivo'] = 'protegida'
+        elif nome == fonte_pages:
+            item['motivo'] = 'publica o GitHub Pages'
+        elif BRANCHES_FIXAS.match(nome):
+            item['motivo'] = 'branch de deploy ou de uso contínuo'
         elif nome in abertos:
             item['motivo'] = 'tem PR aberto'
         else:
@@ -1080,7 +1156,17 @@ def ferramenta_branches(ctx):
         feitas = []
         with Progresso(t, len(apagar), 'apagando') as pr:
             for r, b in apagar:
-                st, _ = gh.requisita(f'/repos/{r["full_name"]}/git/refs/heads/{quote(b["nome"], safe="/")}', metodo='DELETE')
+                ref = quote(b['nome'], safe='/')
+                # se alguém mandou commit depois da análise, a branch não é mais a mesma: fica
+                try:
+                    agora = gh.json(f'/repos/{r["full_name"]}/git/refs/heads/{ref}')['object']['sha']
+                except (ErroAPI, KeyError, TypeError):
+                    agora = None
+                if agora != b['sha']:
+                    t.aviso(f'{r["name"]}/{b["nome"]}: mudou depois da análise, ficou')
+                    pr.avanca(b['nome'])
+                    continue
+                st, _ = gh.requisita(f'/repos/{r["full_name"]}/git/refs/heads/{ref}', metodo='DELETE')
                 if st == 204:
                     feitas.append({'repo': r['full_name'], 'branch': b['nome'], 'sha': b['sha']})
                 else:
@@ -1121,7 +1207,10 @@ def restaura_branches(ctx, arq):
 
 HOSTS_DEMO = ('vercel.app', 'netlify.app', 'github.io', 'pages.dev', 'onrender.com', 'railway.app', 'fly.dev',
               'herokuapp.com', 'surge.sh', 'firebaseapp.com', 'web.app', 'glitch.me', 'kessleru.com.br')
-PALAVRAS_DEMO = re.compile(r'(?i)demo|ao vivo|ver site|site|deploy|live|preview|acess|online|no ar')
+# palavra forte já basta; palavra fraca ("site", "acesse") só conta se o endereço for seu ou de deploy,
+# senão "site do MDN" e "guia de acessibilidade" viravam a demo do projeto
+PALAVRAS_DEMO = re.compile(r'(?i)\b(demo|demonstra[cç][aã]o|ao vivo|live|preview|deploy|no ar)\b')
+PALAVRAS_FRACAS = re.compile(r'(?i)\b(site|acesse|acessar|acesso|online|ver o projeto|abrir)\b')
 SINAIS_404 = [
     ('deployment_not_found', 'o deploy não existe mais na Vercel'),
     ('the deployment could not be found', 'o deploy não existe mais na Vercel'),
@@ -1159,7 +1248,8 @@ def links_de_demo(md, repo=''):
         # host de deploy só conta sozinho se for seu (seu usuário ou o nome do repositório no endereço);
         # link de crédito para o github.io de outra pessoa não é a sua demo
         meu = DONO.lower() in host or (repo and re.sub(r'[^a-z0-9]', '', repo.lower())[:10] in re.sub(r'[^a-z0-9]', '', host))
-        if PALAVRAS_DEMO.search(txt) or (host.endswith(HOSTS_DEMO) and meu):
+        de_deploy = host.endswith(HOSTS_DEMO)
+        if PALAVRAS_DEMO.search(txt) or ((meu or de_deploy) and PALAVRAS_FRACAS.search(txt)) or (de_deploy and meu):
             saida.append(url)
     return saida
 
@@ -1217,7 +1307,7 @@ def checa_url(url):
     if sinal:
         return {'nivel': 'quebrado', 'msg': sinal, 'tempo': tempo}
     if status in (401, 403):
-        return {'nivel': 'protegido', 'msg': 'pede login (proteção de deploy?)', 'tempo': tempo}
+        return {'nivel': 'protegido', 'msg': f'acesso bloqueado ({status}): proteção de deploy ou anti-robô', 'tempo': tempo}
     if status >= 400:
         return {'nivel': 'quebrado', 'msg': f'HTTP {status}', 'tempo': tempo}
     if tempo > 3:
@@ -1266,7 +1356,7 @@ def ferramenta_demos(ctx):
     t.escreve()
     t.titulo('resumo')
     t.partes([t.p(f'{cont[n]} {rot}', estilo[n][1]) for n, rot in
-              (('ok', 'no ar'), ('lento', 'lentos'), ('protegido', 'pedem login'), ('quebrado', 'fora do ar')) if cont[n]]
+              (('ok', 'no ar'), ('lento', 'lentos'), ('protegido', 'bloqueados'), ('quebrado', 'fora do ar')) if cont[n]]
              + [t.p(f'{len(sem_demo)} sem demo', 'apagado')])
     if so_cfg:
         t.escreve()
@@ -1338,7 +1428,9 @@ def backup_repo(r, destino, env):
         return 'sujo', 'tem arquivos mexidos à mão; não atualizei'
     if git_txt(pasta, 'merge-base', '--is-ancestor', atual, novo)[0] == 0:
         _, n, _ = git_txt(pasta, 'rev-list', '--count', f'{atual}..{novo}')
-        git_txt(pasta, 'merge', '-q', '--ff-only', 'FETCH_HEAD')
+        cod, _, erro = git_txt(pasta, 'merge', '-q', '--ff-only', 'FETCH_HEAD')
+        if cod != 0:
+            return 'sujo', corta(f'não deu para atualizar: {erro.splitlines()[-1] if erro else "merge falhou"}', 60)
         return 'atualizado', f'+{n} commit' + ('s' if n != '1' else '')
     # o histórico foi reescrito no GitHub (ex.: coautores): guarda a cópia velha e baixa de novo
     antigos.mkdir(exist_ok=True)
@@ -1348,17 +1440,51 @@ def backup_repo(r, destino, env):
 
 
 def escreve_indice(destino, repos):
+    # o índice vem do disco, não só dos repositórios desta rodada: rodar "backup Um" não apaga os outros
+    arq = destino / 'INDICE.md'
+    privados = {r['name'] for r in repos if r.get('private')}
+    try:
+        privados |= set(re.findall(r'^\| 🔒 ([^|]+?) \|', arq.read_text(encoding='utf-8'), re.M))
+    except OSError:
+        pass
+    privados -= {r['name'] for r in repos if not r.get('private')}
     linhas = ['# Backup dos repositórios', '', f'Atualizado em {datetime.now():%d/%m/%Y %H:%M} pelo ferramentas.', '',
               '| Repositório | Branch | Último commit | Mensagem |', '| --- | --- | --- | --- |']
-    for r in repos:
-        pasta = destino / r['name']
+    for pasta in sorted((p for p in destino.iterdir() if p.is_dir() and not p.name.startswith('.')), key=lambda p: p.name.lower()):
         if not (pasta / '.git').exists():
             continue
+        _, ramo, _ = git_txt(pasta, 'branch', '--show-current')
         _, info, _ = git_txt(pasta, 'log', '-1', '--format=%ad\t%s', '--date=short')
         data, _, msg = info.partition('\t')
-        vis = '🔒 ' if r.get('private') else ''
-        linhas.append(f'| {vis}{r["name"]} | {r.get("default_branch")} | {data} | {msg.replace("|", "/")[:70]} |')
-    (destino / 'INDICE.md').write_text('\n'.join(linhas) + '\n', encoding='utf-8')
+        vis = '🔒 ' if pasta.name in privados else ''
+        linhas.append(f'| {vis}{pasta.name} | {ramo} | {data} | {msg.replace("|", "/")[:70]} |')
+    arq.write_text('\n'.join(linhas) + '\n', encoding='utf-8')
+
+
+def acha_renomeados(gh, destino, repos):
+    """Pasta com o nome antigo de um repositório renomeado no GitHub: troca o nome em vez de baixar tudo de novo."""
+    faltam = {r['full_name'].lower(): r for r in repos if not (destino / r['name']).exists()}
+    nomes = {r['name'].lower() for r in repos}
+    feitos = []
+    if not faltam:
+        return feitos
+    for pasta in destino.iterdir():
+        if not pasta.is_dir() or pasta.name.startswith('.') or pasta.name.lower() in nomes or not (pasta / '.git').exists():
+            continue
+        _, url, _ = git_txt(pasta, 'remote', 'get-url', 'origin')
+        m = re.search(r'github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$', url)
+        if not m:
+            continue
+        try:
+            atual = (gh.json(f'/repos/{m.group(1)}') or {}).get('full_name', '').lower()
+        except ErroAPI:
+            continue
+        r = faltam.pop(atual, None)
+        if r:
+            pasta.rename(destino / r['name'])
+            git_txt(destino / r['name'], 'remote', 'set-url', 'origin', f'https://github.com/{r["full_name"]}.git')
+            feitos.append((pasta.name, r['name']))
+    return feitos
 
 
 def ferramenta_backup(ctx):
@@ -1371,6 +1497,8 @@ def ferramenta_backup(ctx):
     if not repos:
         return
     env = gh.env_git()
+    for velho, novo in acha_renomeados(gh, destino, repos):
+        t.item('→', 'azul', f'{velho} → {novo}', t.p('renomeado no GitHub; pasta renomeada', 'apagado'))
     res, falhas = em_paralelo(t, repos, lambda r: backup_repo(r, destino, env), 'baixando', fios=4)
     estilo = {'novo': ('+', 'verde', 'baixado'), 'atualizado': ('↑', 'verde', 'atualizado'), 'em_dia': ('✓', 'apagado', 'em dia'),
               'refeito': ('↻', 'amarelo', 'baixado de novo'), 'sujo': ('!', 'amarelo', 'pulado'),
@@ -1802,19 +1930,23 @@ if eh_claude(commit.committer_name, commit.committer_email):
 '''
 
 
+FILTER_REPO_VERSAO = '2.47.0'
+
+
 def prepara_filter_repo(t):
     if roda(['git', 'filter-repo', '--version']).returncode == 0:
         return ['git', 'filter-repo']
     t.nota('preparando o git-filter-repo (só na primeira vez)…')
-    roda([sys.executable, '-m', 'pip', 'install', '--user', '--quiet', 'git-filter-repo'], tempo=300)
+    # versão fixa: o script roda com acesso ao seu histórico, então não pode mudar sem você saber
+    roda([sys.executable, '-m', 'pip', 'install', '--user', '--quiet', f'git-filter-repo=={FILTER_REPO_VERSAO}'], tempo=300)
     r = roda([sys.executable, '-c', 'import git_filter_repo; print(git_filter_repo.__file__)'])
     caminho = texto(r.stdout).strip() if r.returncode == 0 else ''
     if not caminho:
-        destino = CASA / 'bin' / 'git_filter_repo.py'
+        destino = CASA / 'bin' / f'git_filter_repo-{FILTER_REPO_VERSAO}.py'
         destino.parent.mkdir(parents=True, exist_ok=True)
         if not destino.exists():
             roda(['curl', '-fsSL', '-o', destino,
-                  'https://raw.githubusercontent.com/newren/git-filter-repo/main/git-filter-repo'], tempo=120)
+                  f'https://raw.githubusercontent.com/newren/git-filter-repo/v{FILTER_REPO_VERSAO}/git-filter-repo'], tempo=120)
         caminho = str(destino) if destino.exists() else ''
     if not caminho or roda([sys.executable, caminho, '--version']).returncode != 0:
         return None
@@ -1963,7 +2095,7 @@ ALVOS = {
     'node_modules': ('dependências', PACOTES_JS),
     '.next': ('build', PACOTES_JS), '.nuxt': ('build', PACOTES_JS), '.svelte-kit': ('build', PACOTES_JS),
     '.turbo': ('cache', PACOTES_JS), '.parcel-cache': ('cache', PACOTES_JS), '.angular': ('cache', PACOTES_JS),
-    '.astro': ('cache', PACOTES_JS), '.expo': ('cache', PACOTES_JS), '.vercel': ('cache', PACOTES_JS),
+    '.astro': ('cache', PACOTES_JS), '.expo': ('cache', PACOTES_JS),
     'coverage': ('build', PACOTES_JS), 'out': ('build', PACOTES_JS),
     'dist': ('build', PACOTES_JS | {'pyproject.toml', 'setup.py'}),
     'build': ('build', PACOTES_JS | {'pyproject.toml', 'setup.py', 'build.gradle', 'build.gradle.kts', 'pubspec.yaml'}),
@@ -2091,12 +2223,13 @@ def varre(raizes, pr):
 
 
 def dias_parado(projeto, nomes_alvo):
+    # o mais recente entre o último commit e os arquivos da raiz: trabalho sem commit também conta
     agora = time.time()
+    ultimo = 0
     if os.path.isdir(os.path.join(projeto, '.git')) and shutil.which('git'):
         r = subprocess.run(['git', '-C', projeto, 'log', '-1', '--format=%ct'], capture_output=True)
         if r.returncode == 0 and r.stdout.strip().isdigit():
-            return int((agora - int(r.stdout.strip())) // 86400)
-    ultimo = 0
+            ultimo = int(r.stdout.strip())
     try:
         with os.scandir(projeto) as it:
             for e in it:
@@ -2107,7 +2240,7 @@ def dias_parado(projeto, nomes_alvo):
                 except OSError:
                     pass
     except OSError:
-        return None
+        pass
     return int((agora - ultimo) // 86400) if ultimo else None
 
 
@@ -2171,7 +2304,9 @@ def apaga(caminho):
     alvo = caminho
     if os.name == 'nt':
         alvo = os.path.abspath(caminho)
-        if not alvo.startswith('\\\\?\\'):
+        if alvo.startswith('\\\\') and not alvo.startswith('\\\\?\\'):
+            alvo = '\\\\?\\UNC\\' + alvo[2:]  # pasta de rede: \\servidor\pasta
+        elif not alvo.startswith('\\\\?\\'):
             alvo = '\\\\?\\' + alvo
     erros = []
 
@@ -2578,8 +2713,9 @@ def tempo_rodando(inicio):
 
 def _vivo(pid):
     if os.name == 'nt':
-        _, out = roda_txt(['tasklist', '/FI', f'PID eq {pid}', '/NH'])
-        return str(pid) in out
+        # CSV: "nome","pid",...; procurar o número solto no texto confundia com a coluna de memória
+        _, out = roda_txt(['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'])
+        return any(len(c) > 1 and c[1] == str(pid) for c in (l.strip().strip('"').split('","') for l in out.splitlines()))
     try:
         os.kill(pid, 0)
         return True
@@ -3049,7 +3185,10 @@ def checa_acessibilidade(d):
                  dica='ponha <html lang="pt-BR">: o leitor de tela usa isso para escolher a voz', ref='WCAG 3.1.1'))
     A.append(ach('acessibilidade', 'ok' if d.titulo else 'falha', 'titulo', 'título da página',
                  dica='todo documento precisa de <title>', ref='WCAG 2.4.2'))
-    sem_alt = [i for i in d.imgs if 'alt' not in i]
+    # imagem escondida do leitor de tela, ou com nome por aria, não precisa de alt (como no axe)
+    sem_alt = [i for i in d.imgs if 'alt' not in i and (i.get('aria-hidden') or '').lower() != 'true'
+               and (i.get('role') or '').lower() not in ('presentation', 'none')
+               and not (i.get('aria-label') or i.get('aria-labelledby') or i.get('title'))]
     A.append(ach('acessibilidade', 'falha' if sem_alt else 'ok', 'img-alt',
                  pl(len(sem_alt), 'imagem', 'imagens') + ' sem texto alternativo' if sem_alt else 'imagens com texto alternativo',
                  [f'<img src="{corta(i.get("src", ""), 40)}">' for i in sem_alt[:3]],
@@ -3119,7 +3258,10 @@ def checa_acessibilidade(d):
     A.append(ach('acessibilidade', 'ok' if 'main' in d.marcos else 'aviso', 'main',
                  'região principal marcada (<main>)' if 'main' in d.marcos else 'sem <main>',
                  dica='envolva o conteúdo principal em <main>: leitores de tela pulam direto para ele', ref='WCAG 1.3.1'))
-    primeiros = [a for a in d.ancoras[:5] if (a['href'] or '').startswith('#') and len(a['href']) > 1]
+    # link de pular de verdade: aponta para o conteúdo, ou diz "pular"; "#sobre" no menu não conta
+    primeiros = [a for a in d.ancoras[:5] if (a['href'] or '').startswith('#') and len(a['href']) > 1 and (
+        re.search(r'main|conte[uú]do|content|principal|inicio-conteudo', a['href'], re.I)
+        or re.search(r'pular|saltar|ir para o conte|skip', a['nome'] or '', re.I))]
     A.append(ach('acessibilidade', 'ok' if primeiros else 'info', 'pular', 'link "pular para o conteúdo"' if primeiros else 'sem link "pular para o conteúdo"',
                  dica='um link no começo que leva ao <main> poupa dezenas de Tabs', ref='WCAG 2.4.1'))
     genericos = [a for a in d.ancoras if GENERICOS.match((a['texto'] or '').strip())]
@@ -3170,7 +3312,7 @@ def checa_seo(d, bruto, url, robots, sitemap, renderizado):
         S.append(ach('seo', 'aviso', 'titulo-js', 'o título só aparece depois do JavaScript',
                      dica='coloque o <title> no index.html; robôs simples veem a página sem título'))
     S.append(ach('seo', 'ok' if d.meta('twitter:card') or bruto.meta('twitter:card') else 'info', 'twitter',
-                 'cartão do X/Twitter' if d.meta('twitter:card') else 'sem twitter:card', dica='<meta name="twitter:card" content="summary_large_image">'))
+                 'cartão do X/Twitter' if d.meta('twitter:card') or bruto.meta('twitter:card') else 'sem twitter:card', dica='<meta name="twitter:card" content="summary_large_image">'))
     icone = d.link_rel('icon') or d.link_rel('shortcut') or d.link_rel('apple-touch-icon')
     S.append(ach('seo', 'ok' if icone else 'aviso', 'favicon', 'favicon definido' if icone else 'sem favicon no HTML',
                  dica='<link rel="icon" href="/favicon.svg">'))
@@ -3379,8 +3521,22 @@ def le_sitemap(origem, sitemaps):
     for alvo in (sitemaps or []) + [origem + '/sitemap.xml']:
         r = busca(alvo, tempo=15)
         if r['status'] == 200 and b'<loc>' in r['corpo']:
-            return re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', r['corpo'].decode('utf-8', 'replace'))
+            locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', r['corpo'].decode('utf-8', 'replace'))
+            if b'<sitemapindex' not in r['corpo']:
+                return locs
+            # índice de sitemaps: as <loc> são outros sitemaps, não páginas
+            paginas = []
+            for sub in locs[:5]:
+                rs = busca(sub, tempo=15)
+                if rs['status'] == 200:
+                    paginas += re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', rs['corpo'].decode('utf-8', 'replace'))
+            return paginas
     return []
+
+
+def link_quebrado(l):
+    # 401/403/429 e o 999 do LinkedIn são o site recusando robôs, não link quebrado
+    return bool(l['erro']) or (l['status'] >= 400 and l['status'] not in (401, 403, 405, 429, 999))
 
 
 def checa_recursos(urls, limite=60):
@@ -3505,7 +3661,7 @@ def analisa_pagina(t, url, args, nav, pr=None, completo=True):
                                'http:// redireciona para https://' if vai else 'http:// não redireciona para https://',
                                dica='quem digita o endereço sem https fica na versão insegura'))
     if completo:
-        quebrados = [l for l in links + recursos if l['erro'] or l['status'] >= 400]
+        quebrados = [l for l in links + recursos if link_quebrado(l)]
         achados.append(ach('links', 'falha' if quebrados else 'ok', 'quebrados',
                            pl(len(quebrados), 'link ou arquivo quebrado', 'links ou arquivos quebrados') if quebrados else f'{len(links) + len(recursos)} links e arquivos funcionando',
                            [f'{l["status"] or l["erro"]} {corta(l["url"], 46)}' for l in quebrados[:4]], 'corrija ou remova os links que levam a erro'))
@@ -3856,7 +4012,7 @@ def ferramenta_raiox(t, args):
 
     if extras:
         t.escreve()
-        t.titulo(f'outras {len(extras)} páginas (análise rápida)')
+        t.titulo(f'outras {pl(len(extras), "página")} (análise rápida)')
         for e in extras:
             caminho = urlparse(e.get('final') or e['url']).path or '/'
             if e.get('erro') or e.get('status', 200) >= 400:
@@ -4364,7 +4520,8 @@ def ferramenta_peso(t, args):
     rotulos = {k: r for k, r, _ in TIPOS_PESO}
     t.escreve()
     t.titulo('por tipo')
-    larg = max(4, min(16, t.largura - 46))
+    com_arqs = t.largura >= 50
+    larg = max(3, min(16, t.largura - (46 if com_arqs else 37)))
     for k, rotulo, cor in TIPOS_PESO:
         v = tipos.get(k)
         if not v:
@@ -4374,13 +4531,13 @@ def ferramenta_peso(t, args):
         if k in ORCAMENTO and nivel_orcamento(k, v['bytes']) != 'ok':
             estouro = t.p(' !', 'amarelo' if nivel_orcamento(k, v['bytes']) == 'aviso' else 'vermelho', True)
         antes = (anterior or {}).get('tipos', {}).get(k)
-        tam, arqs = humano(v['bytes']), f"{v['n']:>3} arq."
+        tam, arqs = humano(v['bytes']), f" {v['n']:>3} arq." if com_arqs else ''
         t.escreve(f'    {t.p(f"{rotulo:<13}", "texto")}{barra_peso(t, v["bytes"] / max(total, 1), larg, cor)} '
-                  f'{t.p(f"{tam:>8}", "texto")} {t.p(f"{pct:>3.0f}%", "sub")} '
+                  f'{t.p(f"{tam:>8}", "texto")} {t.p(f"{pct:>3.0f}%", "sub")}'
                   f'{t.p(arqs, "apagado")}{estouro}{delta(v["bytes"], antes)}')
     tam, rot = humano(total), 'total'
     t.escreve(f'    {t.p(f"{rot:<13}", "texto", True)}{" " * (larg + 1)}{t.p(f"{tam:>8}", "texto", True)}'
-              f'      {t.p(f"{n_req:>3} arq.", "apagado")}{delta(total, (anterior or {}).get("total"))}')
+              + (f'      {t.p(f"{n_req:>3} arq.", "apagado")}' if com_arqs else '') + delta(total, (anterior or {}).get('total')))
     if med.get('sob_demanda'):
         extra = sum(r['transferido'] for r in med['sob_demanda'])
         t.paragrafo(f'+ {humano(extra)} em {pl(len(med["sob_demanda"]), "arquivo")} que só descem se a pessoa rolar '
@@ -4746,8 +4903,10 @@ def checa_pip():
     # --not-required: só o que você instalou, não as dependências (atualizar dependência solta quebra quem depende dela)
     cod, out, err = _sai([sys.executable, '-m', 'pip', 'list', '--outdated', '--not-required', '--format=json',
                           '--disable-pip-version-check'], 240)
+    if cod != 0 and 'No module named pip' in err:
+        return [], 'este Python não tem pip'
     if cod != 0:
-        raise RuntimeError('o pip não respondeu' if 'No module named pip' not in err else 'pip não instalado')
+        raise RuntimeError('o pip não respondeu')
     return [(p['name'], p['version'], p['latest_version']) for p in json.loads(out or '[]')]
 
 
@@ -5013,7 +5172,9 @@ def ferramenta_atualizar(t, args):
             for nome, atual, novo in mostrar:
                 seta = f'{atual} → {novo}' if atual else f'→ {novo}'
                 major = subiu_major(atual, novo)
-                linha = f'{corta(nome, max(10, t.largura - 12 - len(seta) - (8 if major else 0)))}  {seta}'
+                cabe = t.largura - 10 - (8 if major else 0)
+                seta = corta(seta, max(12, cabe - 8))
+                linha = f'{corta(nome, max(6, cabe - len(seta) - 2))}  {seta}'
                 t.escreve(' ' * 8 + t.p(linha, 'sub') + (t.p(' (major)', 'amarelo') if major else ''))
             if len(itens) > len(mostrar):
                 t.nota(f'e mais {len(itens) - len(mostrar)} (veja todas com --tudo)', 8)
@@ -5152,30 +5313,37 @@ def _espera(self, txt):
     try:
         input(self._adapta('  ' + self.p(txt, 'apagado') + ' '))
     except EOFError:
-        pass
+        raise KeyboardInterrupt  # sem entrada (fim do pipe): sai do menu em vez de repetir para sempre
 
 
 Terminal.limpa = _limpa
 Terminal.espera = _espera
 
 
-def roda_ferramenta(ctx, args):
+def roda_ferramenta(ctx, args, mostra_descricao=True):
     cmd, arquivo, desc, funcao, grupo = next(f for f in FERRAMENTAS if f[0] == args.comando)
     t = ctx.t
+    if mostra_descricao:
+        t.aba(arquivo, desc)
     for prog in PRECISA.get(cmd, ()):
         if not shutil.which(prog):
             t.erro(f'Essa ferramenta precisa do {prog} instalado.')
+            t.fim('não rodou')
             return 1
-    t.aba(arquivo, desc)
     inicio = time.time()
-    if grupo == 'repos':
-        ctx.args = args
-        cod = globals()[funcao](ctx)
-    else:
-        cod = globals()[funcao](t, args)
+    try:
+        if grupo == 'repos':
+            ctx.args = args
+            cod = globals()[funcao](ctx)
+        else:
+            cod = globals()[funcao](t, args)
+    except KeyboardInterrupt:
+        t.fim('interrompido')
+        return 130
     ctx.estado[cmd] = agora_iso()
     salva_estado(ctx.estado)
-    t.nota(f'concluído em {time.time() - inicio:.0f} s', 4)
+    dur = time.time() - inicio
+    t.fim(f'concluído em {dur:.0f} s' if dur < 120 else f'concluído em {dur / 60:.0f} min')
     return cod or 0
 
 
@@ -5242,17 +5410,18 @@ def monta_parser():
 
 def menu(ctx, parser, args):
     t = ctx.t
+    nomes = [f[0] for f in FERRAMENTAS]
+    aviso = ''
     while True:
         t.limpa()
+        t.logo()
         t.cabecalho('início')
-        t.titulo('Olá! O que vamos fazer hoje?')
         num, por_numero = 0, {}
         for titulo_grupo, grupo, _ in GRUPOS:
             itens = [f for f in FERRAMENTAS if f[4] == grupo]
             if not itens:
                 continue
-            t.escreve()
-            t.escreve('  ' + t.p(f'─ {titulo_grupo} ', 'apagado') + t.p('─' * max(0, t.largura - len(titulo_grupo) - 6), 'fundo'))
+            t.titulo(titulo_grupo)
             for cmd, _, desc, _, _ in itens:
                 num += 1
                 por_numero[str(num)] = cmd
@@ -5261,37 +5430,56 @@ def menu(ctx, parser, args):
                 if quando and vlen(esq) + len(quando) + 2 <= t.largura:
                     esq += ' ' * (t.largura - vlen(esq) - len(quando)) + t.p(quando, 'apagado')
                 t.escreve(esq)
+            t.escreve()
+        t.escreve(f'  {t.p(" 0", "apagado", True)}  {t.p("sair", "apagado")}')
         t.escreve()
-        t.escreve(f'  {t.p(" 0", "verde", True)}  {t.p("sair", "apagado")}')
-        t.escreve()
-        escolha = t.pergunta('início').strip().lower()
+        if aviso:
+            t.aviso(aviso)
+            aviso = ''
+        escolha = t.pergunta('número ou nome').strip().lower()
         if escolha in ('', '0', 'q', 'sair'):
+            t.fim('até mais')
             return 0
-        cmd = por_numero.get(escolha) or (escolha if escolha in [f[0] for f in FERRAMENTAS] else None)
+        cmd = por_numero.get(escolha) or (escolha if escolha in nomes else None)
         if not cmd:
+            aviso = f'"{corta(escolha, 20)}" não é uma das opções.'
             continue
-        grupo = next(f[4] for f in FERRAMENTAS if f[0] == cmd)
+        _, arquivo, desc, _, grupo = next(f for f in FERRAMENTAS if f[0] == cmd)
+        t.limpa()
+        t.cabecalho(cmd)
+        t.aba(arquivo, desc)
         extra = []
-        t.escreve()
         if grupo == 'repos':
             t.paragrafo('Enter = todos os repositórios, ou digite os nomes separados por espaço', 2, 'apagado')
-            extra = t.pergunta(f'{cmd}/repos').split()
+            extra = t.pergunta('repositórios').split()
             if cmd in ('branches', 'coautores'):
                 t.paragrafo('só simular primeiro, sem alterar nada? s = sim, Enter = não', 2, 'apagado')
-                if t.pergunta(f'{cmd}/simular').strip().lower() in ('s', 'sim'):
+                if t.pergunta('simular').strip().lower() in ('s', 'sim'):
                     extra.append('--teste')
+            t.escreve()
         elif cmd in ('raiox', 'peso'):
             t.paragrafo('endereço do site (ex.: kessleru.com.br ou localhost:5173); Enter = voltar', 2, 'apagado')
-            endereco = t.pergunta(f'{cmd}/url').strip()
+            endereco = t.pergunta('endereço').strip()
             if not endereco:
                 continue
             extra = [endereco]
-        sub_args = parser.parse_args([cmd] + extra)
-        for k in ('ascii', 'sem_cor'):
-            setattr(sub_args, k, getattr(args, k))
-        roda_ferramenta(ctx, sub_args)
-        t.escreve()
-        t.espera('Enter para voltar ao menu')
+            t.escreve()
+        try:
+            # nome com "-" na frente seria lido como opção, e o argparse encerraria o programa inteiro
+            sub_args = parser.parse_args([cmd] + ['--'] + extra if extra and grupo == 'repos' else [cmd] + extra)
+        except SystemExit:
+            t.fim('não entendi o que foi digitado')
+            t.espera('Enter para voltar ao menu')
+            continue
+        for k in ('ascii', 'sem_cor', 'teste', 'sim'):
+            if getattr(args, k, False):
+                setattr(sub_args, k, True)
+        roda_ferramenta(ctx, sub_args, mostra_descricao=False)
+        t.escreve(guia=False)
+        try:
+            t.espera('Enter para voltar ao menu')
+        except KeyboardInterrupt:
+            return 130
 
 
 def main():
@@ -5305,10 +5493,16 @@ def main():
             return roda_ferramenta(ctx, args)
         return menu(ctx, parser, args)
     except KeyboardInterrupt:
-        t.para_vivo()
-        t.escreve()
-        t.aviso('interrompido.')
+        t.fim('interrompido')
+        t.escreve(guia=False)
         return 130
+    except BrokenPipeError:
+        # saída num pipe que fechou antes (ex.: "| head"): sai quieto, sem rastro de erro
+        try:
+            sys.stdout = open(os.devnull, 'w')
+        except OSError:
+            pass
+        return 0
 
 
 if __name__ == '__main__':
