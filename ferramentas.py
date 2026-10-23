@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-# ferramentas-git — onze ferramentas num arquivo só, em duas partes.
+# ferramentas — onze ferramentas num arquivo só, em duas partes.
 #
-#   python ferramentas-git.py                abre o menu
+#   python ferramentas.py                abre o menu
 #
 #   PARTE 1 · seus repositórios no GitHub
-#   python ferramentas-git.py segredos       caça chaves e senhas no histórico
-#   python ferramentas-git.py branches       apaga branches já mescladas
-#   python ferramentas-git.py demos          confere se os sites das demos estão no ar
-#   python ferramentas-git.py backup         baixa/atualiza a branch principal de todos
-#   python ferramentas-git.py deps           vulnerabilidades e dependências velhas
-#   python ferramentas-git.py coautores      tira a coautoria do Claude do histórico
+#   python ferramentas.py segredos       caça chaves e senhas no histórico
+#   python ferramentas.py branches       apaga branches já mescladas
+#   python ferramentas.py demos          confere se os sites das demos estão no ar
+#   python ferramentas.py backup         baixa/atualiza a branch principal de todos
+#   python ferramentas.py deps           vulnerabilidades e dependências velhas
+#   python ferramentas.py coautores      tira a coautoria do Claude do histórico
 #
 #   PARTE 2 · seu computador e seus sites
-#   python ferramentas-git.py faxina         libera espaço de projetos parados (node_modules, venv, builds, caches)
-#   python ferramentas-git.py portas         quem está usando cada porta, e encerra quem você escolher
-#   python ferramentas-git.py raiox SITE     acessibilidade, SEO, desempenho, segurança e links de um site
-#   python ferramentas-git.py peso SITE      o que cada página carrega, o que mais pesa e quanto dá para economizar
-#   python ferramentas-git.py atualizar      atualiza sistema, linguagens, pacotes globais e extensões do PC
+#   python ferramentas.py faxina         libera espaço de projetos parados (node_modules, venv, builds, caches)
+#   python ferramentas.py portas         quem está usando cada porta, e encerra quem você escolher
+#   python ferramentas.py raiox SITE     acessibilidade, SEO, desempenho, segurança e links de um site
+#   python ferramentas.py peso SITE      o que cada página carrega, o que mais pesa e quanto dá para economizar
+#   python ferramentas.py atualizar      atualiza sistema, linguagens, pacotes globais e extensões do PC
 #
 # Opções de todas: --teste (só mostra, não altera nada), --sim (não pergunta), --ascii, --sem-cor.
-# Cada ferramenta tem as suas: python ferramentas-git.py backup --help
+# Cada ferramenta tem as suas: python ferramentas.py backup --help
 #
 # Precisa de Python 3.8+. A parte 1 usa git e curl; o raio-x e o peso usam curl.
 # O git-filter-repo (só para o coautores) se instala sozinho.
@@ -46,8 +46,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-DONO = os.environ.get('FERRAMENTAS_GIT_DONO', 'kessleru')
-CASA = Path(os.environ.get('FERRAMENTAS_GIT_CASA') or Path.home() / '.ferramentas-git')
+DONO = os.environ.get('FERRAMENTAS_DONO') or os.environ.get('FERRAMENTAS_GIT_DONO') or 'kessleru'
+
+
+def _pasta_da_casa():
+    escolhida = os.environ.get('FERRAMENTAS_CASA') or os.environ.get('FERRAMENTAS_GIT_CASA')
+    if escolhida:
+        return Path(escolhida)
+    nova, velha = Path.home() / '.ferramentas', Path.home() / '.ferramentas-git'
+    # a pasta se chamava .ferramentas-git: leva junto relatórios, cache, backups e o estado
+    if velha.is_dir() and not nova.exists():
+        try:
+            velha.rename(nova)
+        except OSError:
+            return velha
+    return nova
+
+
+CASA = _pasta_da_casa()
 
 # ═══════════════════════════════ núcleo: utilidades ═══════════════════════════════
 
@@ -208,7 +224,7 @@ class Terminal:
         # o Python força UTF-8 até em locale "C", então quem diz se o terminal entende UTF-8 é o idioma
         idioma = env.get('LC_ALL') or env.get('LC_CTYPE') or env.get('LANG') or ''
         sem_utf8 = os.name != 'nt' and ((idioma and 'utf' not in idioma.lower()) or (cod_original and 'utf8' not in cod_original))
-        if ascii_forcado or env.get('FERRAMENTAS_GIT_ASCII') or sem_utf8:
+        if ascii_forcado or env.get('FERRAMENTAS_ASCII') or env.get('FERRAMENTAS_GIT_ASCII') or sem_utf8:
             self.nivel = 'ascii'
         elif (os.name == 'nt' and not win_moderno) or termo == 'linux':
             self.nivel = 'simples'
@@ -268,7 +284,7 @@ class Terminal:
     def cabecalho(self, caminho):
         w = self.largura
         bolas = ' '.join(self.p('●', c) for c in ('vermelho', 'amarelo', 'verde'))
-        titulo = 'ferramentas-git — Visual Studio Code' if w >= 60 else 'ferramentas-git'
+        titulo = 'ferramentas — Visual Studio Code' if w >= 60 else 'ferramentas'
         self.escreve()
         self.escreve(' ' + bolas + ' ' * max(2, (w - 6 - len(titulo)) // 2) + self.p(titulo, 'apagado'))
         self.escreve(' ' + self.p('~', 'verde') + self.p(f'/{caminho}/', 'texto') + self.p('█', 'verde'))
@@ -401,7 +417,7 @@ class Progresso:
 
 class Relatorio:
     def __init__(self, nome):
-        self.nome, self.linhas = nome, [f'ferramentas-git · {nome} · {datetime.now():%d/%m/%Y %H:%M}', '']
+        self.nome, self.linhas = nome, [f'ferramentas · {nome} · {datetime.now():%d/%m/%Y %H:%M}', '']
 
     def add(self, *linhas):
         self.linhas.extend(linhas)
@@ -471,7 +487,7 @@ class GitHub:
         do_github = url.startswith(self.API)
         aceita = aceita or ('application/vnd.github+json' if do_github else 'application/json')
         # o token vai pela configuração no stdin do curl, nunca na linha de comando
-        cfg = [f'url = "{url}"', f'header = "Accept: {aceita}"', 'header = "User-Agent: ferramentas-git"']
+        cfg = [f'url = "{url}"', f'header = "Accept: {aceita}"', 'header = "User-Agent: ferramentas"']
         if do_github:
             cfg.append('header = "X-GitHub-Api-Version: 2022-11-28"')
             if self.token:
@@ -1181,9 +1197,9 @@ def coleta_demos(gh, r):
 
 
 def checa_url(url):
-    marca = '\n__ferramentas_git__'
+    marca = '\n__ferramentas__'
     r = roda(['curl', '-sS', '-L', '--compressed', '--max-time', '20', '--max-redirs', '8',
-              '-A', 'Mozilla/5.0 (ferramentas-git; verificador de demos)', '-o', '-',
+              '-A', 'Mozilla/5.0 (ferramentas; verificador de demos)', '-o', '-',
               '-w', marca + '%{http_code} %{time_total}', url], tempo=30)
     corpo, _, fim = r.stdout.rpartition(marca.encode())
     partes = texto(fim).split()
@@ -1330,7 +1346,7 @@ def backup_repo(r, destino, env):
 
 
 def escreve_indice(destino, repos):
-    linhas = ['# Backup dos repositórios', '', f'Atualizado em {datetime.now():%d/%m/%Y %H:%M} pelo ferramentas-git.', '',
+    linhas = ['# Backup dos repositórios', '', f'Atualizado em {datetime.now():%d/%m/%Y %H:%M} pelo ferramentas.', '',
               '| Repositório | Branch | Último commit | Mensagem |', '| --- | --- | --- | --- |']
     for r in repos:
         pasta = destino / r['name']
@@ -2742,7 +2758,7 @@ def ferramenta_portas(t, args):
 # ═══════════════════════════════ 9. raio-x ═══════════════════════════════
 
 UA_NAVEGADOR = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0 Safari/537.36 ferramentas-git/raiox')
+                'Chrome/124.0 Safari/537.36 ferramentas/raiox')
 ERROS_REDE = {6: 'o domínio não existe', 7: 'conexão recusada', 28: 'demorou demais', 35: 'erro de HTTPS',
               47: 'redirecionamentos demais', 51: 'certificado HTTPS inválido', 52: 'o servidor não respondeu',
               56: 'a conexão caiu', 58: 'certificado HTTPS inválido', 60: 'certificado HTTPS inválido'}
@@ -3583,7 +3599,7 @@ def gera_resumo_ia(res, notas, lh, extras, fontes):
     prio = {'falha': 'ALTA', 'aviso': 'MÉDIA', 'info': 'BAIXA (opcional)'}
     rotulos = dict(CATEGORIAS)
     L = [f'# Raio-x de {res["final"]}: correções', '',
-         f'> Gerado pelo ferramentas-git em {datetime.now():%d/%m/%Y %H:%M}. Notas: '
+         f'> Gerado pelo ferramentas em {datetime.now():%d/%m/%Y %H:%M}. Notas: '
          + ' · '.join(f'{rotulos[c]} {notas[c]}' for c, _ in CATEGORIAS if notas.get(c) is not None), '',
          '## Contexto', '', f'- Endereço analisado: {res["final"]}']
     if res.get('tec') or res.get('hospedagem'):
@@ -3635,7 +3651,7 @@ def gera_resumo_ia(res, notas, lh, extras, fontes):
         for e in paginas:
             L.append(f'- {e["final"]}: ' + '; '.join(a['titulo'] for a in e['achados'] if a['nivel'] == 'falha'))
         L.append('')
-    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas-git.py raiox {res["final"]}`',
+    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas.py raiox {res["final"]}`',
           '- [ ] Nenhum item de prioridade ALTA restante', '- [ ] As notas não caíram em nenhuma categoria', '']
     return '\n'.join(L)
 
@@ -4210,7 +4226,7 @@ def gera_resumo_peso(med, total, tipos, n_req, economia, maiores, terceiros):
     fonte = 'Lighthouse, ' + ('computador' if med.get('desktop') else 'celular') if med['fonte'] == 'lighthouse' else 'medição própria'
     rotulos = {k: r for k, r, _ in TIPOS_PESO}
     L = [f'# Peso de {med["final"]}: o que reduzir', '',
-         f'> Medido pelo ferramentas-git em {datetime.now():%d/%m/%Y %H:%M} ({fonte}). '
+         f'> Medido pelo ferramentas em {datetime.now():%d/%m/%Y %H:%M} ({fonte}). '
          f'Total: {humano(total)} em {n_req} requisições.', '', '## Contexto', '',
          f'- Meta para o celular: até {meta_mb()} por página; a mediana da web é ~2,3 MB.']
     if med.get('tec') or med.get('hospedagem'):
@@ -4253,7 +4269,7 @@ def gera_resumo_peso(med, total, tipos, n_req, economia, maiores, terceiros):
         L += ['## Terceiros', '', 'Scripts e arquivos de outros domínios. Avalie se cada um é necessário, se pode carregar '
               'depois da interação ou ser auto-hospedado (fontes, por exemplo):', '']
         L += [f'- {n}: {humano(v["bytes"])} em {pl(v["n"], "arquivo")}' for n, v in terceiros] + ['']
-    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas-git.py peso {med["final"]}`',
+    L += ['## Como conferir', '', f'- [ ] Rodar de novo: `python ferramentas.py peso {med["final"]}`',
           f'- [ ] Total abaixo de {humano(total)} (meta: {meta_mb()})',
           '- [ ] O site continua igual na tela, no celular e no computador', '']
     return '\n'.join(L)
@@ -5176,7 +5192,7 @@ def monta_parser():
     de_repos.add_argument('--forks', action='store_true', help='inclui forks')
     de_repos.add_argument('--sem-login', action='store_true', help='não usa token; só o acesso que o git já tem')
 
-    p = argparse.ArgumentParser(prog='ferramentas-git', parents=[comum],
+    p = argparse.ArgumentParser(prog='ferramentas', parents=[comum],
                                 description='Ferramentas para os seus repositórios, o seu computador e os seus sites. '
                                             'Sem comando, abre o menu.')
     sub = p.add_subparsers(dest='comando', metavar='comando')

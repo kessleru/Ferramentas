@@ -1,11 +1,11 @@
 <div align="center">
 
-<img src=".github/readme/banner.svg" alt="ferramentas-git: janela de terminal com o logo </> KESSLERU em pixels e a lista das onze ferramentas, no estilo neofetch" width="100%">
+<img src=".github/readme/banner.svg" alt="ferramentas: janela de terminal com o logo </> KESSLERU em pixels e a lista das onze ferramentas, no estilo neofetch" width="100%">
 
 **Onze ferramentas num arquivo só: seis cuidam dos seus repositórios no GitHub e cinco cuidam do seu computador e dos seus sites.**
 
 [![Python](https://img.shields.io/badge/python-3.8%2B-a6e3a1?style=for-the-badge&logo=python&logoColor=black)](https://www.python.org/downloads/)
-[![Dependências](https://img.shields.io/badge/depend%C3%AAncias-zero-313244?style=for-the-badge)](ferramentas-git.py)
+[![Dependências](https://img.shields.io/badge/depend%C3%AAncias-zero-313244?style=for-the-badge)](ferramentas.py)
 [![Terminais](https://img.shields.io/badge/terminais-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-cba6f7?style=for-the-badge)](#funciona-em-qualquer-terminal)
 
 <img src=".github/readme/menu.png" alt="Menu no terminal: logo </> KESSLERU em blocos e as onze ferramentas em dois grupos, GitHub e computador" width="520">
@@ -17,9 +17,9 @@
 Precisa de **Python 3.8+**. Nada para instalar com pip.
 
 ```bash
-python ferramentas-git.py                  # abre o menu
-python ferramentas-git.py segredos         # ou vai direto numa ferramenta
-python ferramentas-git.py raiox meusite.com.br
+python ferramentas.py                  # abre o menu
+python ferramentas.py segredos         # ou vai direto numa ferramenta
+python ferramentas.py raiox meusite.com.br
 ```
 
 A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura seu login sozinha: a variável `GH_TOKEN`, o `gh`, ou o login que o git já guarda. Se não achar, pede um token (tipo *classic*, com `repo` e `workflow`) e não mostra o que você digita.
@@ -38,7 +38,7 @@ A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura se
 <details>
 <summary><b>O que cada uma faz por dentro</b></summary>
 
-- **segredos**: lê cada versão de cada arquivo que já existiu, em todas as branches, e procura mais de 20 tipos de chave (GitHub, AWS, OpenAI, Anthropic, Stripe, Discord, Mercado Pago, chave privada, endereço de banco com senha…). Chave em teste, exemplo ou documentação aparece rebaixada, com o motivo. JWT é aberto para saber se é a `service_role` do Supabase (grave) ou a `anon` (pública). Falso positivo vai para `~/.ferramentas-git/segredos-ignorados.txt`.
+- **segredos**: lê cada versão de cada arquivo que já existiu, em todas as branches, e procura mais de 20 tipos de chave (GitHub, AWS, OpenAI, Anthropic, Stripe, Discord, Mercado Pago, chave privada, endereço de banco com senha…). Chave em teste, exemplo ou documentação aparece rebaixada, com o motivo. JWT é aberto para saber se é a `service_role` do Supabase (grave) ou a `anon` (pública). Falso positivo vai para `~/.ferramentas/segredos-ignorados.txt`.
 - **branches**: compara cada branch com a principal e com os PRs. Só marca para apagar a que já está inteira na principal, ou cujo PR foi mesclado sem commits depois. Guarda o que apagou e desfaz com `--restaurar`. No fim, oferece ligar o "apagar branch após o merge" do GitHub.
 - **demos**: pega o link do campo "site", do README e do GitHub Pages, abre cada um e reconhece página de erro disfarçada (deploy apagado da Vercel, Pages desligado, app suspenso no Render/Heroku).
 - **backup**: clona só a branch principal e, nas próximas vezes, só puxa o que mudou. Se o histórico foi reescrito no GitHub, guarda a cópia velha em `.antigos` antes de baixar de novo; se você mexeu nos arquivos do backup, não atropela. Mantém um `INDICE.md` com o último commit de cada repositório.
@@ -100,7 +100,7 @@ O `raiox` e o `peso` terminam gerando um `.md` com cada problema, onde ele apare
 | `--copiar` | raiox, peso | Copia o resumo para a IA na área de transferência |
 | `--so LISTA` · `--pular LISTA` | atualizar | Só esses, ou menos esses (ex.: `--so npm,pip` ou `--pular editores`) |
 
-Cada ferramenta lista as próprias opções com `--help`, por exemplo `python ferramentas-git.py peso --help`.
+Cada ferramenta lista as próprias opções com `--help`, por exemplo `python ferramentas.py peso --help`.
 
 ## Funciona em qualquer terminal
 
@@ -114,14 +114,14 @@ Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code 
 - Achados de segredos aparecem mascarados (`ghp_…a9`), na tela e no relatório.
 - O `raiox` e o `peso` só leem o site, como um navegador faria.
 
-Relatórios, cache, logs e backups ficam em `~/.ferramentas-git`.
+Relatórios, cache, logs e backups ficam em `~/.ferramentas`.
 
 ## Estrutura
 
 O arquivo é dividido em partes marcadas, para achar qualquer ferramenta rápido:
 
 ```
-ferramentas-git.py
+ferramentas.py
   núcleo                    utilidades e o terminal (cores, símbolos, progresso)
   PARTE 1 · GitHub          login e API, 1. segredos … 6. coautores
   PARTE 2 · computador      7. faxina, 8. portas, 9. raio-x, 10. peso, 11. atualizar
