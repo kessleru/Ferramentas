@@ -39,9 +39,9 @@ A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura se
 <summary><b>O que cada uma faz por dentro</b></summary>
 
 - **segredos**: lê cada versão de cada arquivo que já existiu, em todas as branches, e procura mais de 20 tipos de chave (GitHub, AWS, OpenAI, Anthropic, Stripe, Discord, Mercado Pago, chave privada, endereço de banco com senha…). Chave em teste, exemplo ou documentação aparece rebaixada, com o motivo. JWT é aberto para saber se é a `service_role` do Supabase (grave) ou a `anon` (pública). Falso positivo vai para `~/.ferramentas/segredos-ignorados.txt`.
-- **branches**: compara cada branch com a principal e com os PRs. Só marca para apagar a que já está inteira na principal, ou cujo PR foi mesclado sem commits depois. Guarda o que apagou e desfaz com `--restaurar`. No fim, oferece ligar o "apagar branch após o merge" do GitHub.
-- **demos**: pega o link do campo "site", do README e do GitHub Pages, abre cada um e reconhece página de erro disfarçada (deploy apagado da Vercel, Pages desligado, app suspenso no Render/Heroku).
-- **backup**: clona só a branch principal e, nas próximas vezes, só puxa o que mudou. Se o histórico foi reescrito no GitHub, guarda a cópia velha em `.antigos` antes de baixar de novo; se você mexeu nos arquivos do backup, não atropela. Mantém um `INDICE.md` com o último commit de cada repositório.
+- **branches**: compara cada branch com a principal e com os PRs. Só marca para apagar a que já está inteira na principal, ou cujo PR foi mesclado sem commits depois. Nunca mexe em branch protegida, com PR aberto, de deploy (`develop`, `staging`, `production`, `gh-pages`…) ou que publica o GitHub Pages, e confere de novo antes de apagar: se alguém mandou commit depois da análise, ela fica. Guarda o que apagou e desfaz com `--restaurar`. No fim, oferece ligar o "apagar branch após o merge" do GitHub.
+- **demos**: pega o link do campo "site", do README e do GitHub Pages, abre cada um e reconhece página de erro disfarçada (deploy apagado da Vercel, Pages desligado, app suspenso no Render/Heroku). Link para documentação de outro site ("site do MDN") não é confundido com a sua demo.
+- **backup**: clona só a branch principal e, nas próximas vezes, só puxa o que mudou. Se o histórico foi reescrito no GitHub, guarda a cópia velha em `.antigos` antes de baixar de novo; se você mexeu nos arquivos do backup, não atropela. Repositório renomeado no GitHub tem a pasta renomeada, sem baixar tudo de novo. Mantém um `INDICE.md` com o último commit de cada repositório, mesmo quando você roda só para alguns.
 - **deps**: lê `package-lock.json`, `pnpm-lock.yaml` ou `yarn.lock` direto do GitHub e consulta a mesma base de vulnerabilidades do `npm audit`, contando por pacote como ele. Mostra também o que está atrás de versão major e o que foi descontinuado.
 - **coautores**: remove `Co-Authored-By: Claude`, `Claude-Session` e "Generated with Claude Code" das mensagens, e põe você como autor onde o Claude aparecia. Mesmos arquivos, datas e quantidade de commits; confere isso antes de enviar e guarda um backup de cada repositório.
 
@@ -104,7 +104,7 @@ Cada ferramenta lista as próprias opções com `--help`, por exemplo `python fe
 
 ## Funciona em qualquer terminal
 
-Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code e terminais do Linux. Ele descobre sozinho quantas cores o terminal aguenta (milhões, 256 ou 16) e quais símbolos a fonte tem. Em tela estreita, o logo encolhe para uma linha e nada passa da borda.
+Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code e terminais do Linux. Ele descobre sozinho quantas cores o terminal aguenta (milhões, 256 ou 16) e quais símbolos a fonte tem. Em tela estreita, o logo encolhe para uma linha e nada passa da borda: testado de 40 a 100 colunas, e no Python 3.8 e no 3.13.
 
 ## Segurança
 
@@ -114,7 +114,7 @@ Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code 
 - Achados de segredos aparecem mascarados (`ghp_…a9`), na tela e no relatório.
 - O `raiox` e o `peso` só leem o site, como um navegador faria.
 
-Relatórios, cache, logs e backups ficam em `~/.ferramentas`.
+Relatórios, cache, logs e backups ficam em `~/.ferramentas` (quem usava a versão antiga tem a `~/.ferramentas-git` movida para lá sozinha).
 
 ## Estrutura
 
