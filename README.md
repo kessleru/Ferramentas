@@ -22,7 +22,23 @@ python ferramentas.py segredos         # ou vai direto numa ferramenta
 python ferramentas.py raiox meusite.com.br
 ```
 
-A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura seu login sozinha: a variável `GH_TOKEN`, o `gh`, ou o login que o git já guarda. Se não achar, pede um token (tipo *classic*, com `repo` e `workflow`) e não mostra o que você digita.
+A parte do GitHub também usa **git** e **curl**.
+
+### Login no GitHub
+
+Na primeira vez, a ferramenta procura um login que já exista, nesta ordem: a variável `GH_TOKEN` (ou `GITHUB_TOKEN`), o GitHub CLI (`gh auth login`), um token guardado por ela mesma e o gerenciador de credenciais do git (que já vem no Git para Windows e no macOS). Se não achar nenhum, oferece três caminhos:
+
+- **`a`** abre no navegador o formulário de token do GitHub, já marcado com `repo` e `workflow`: é só escolher a validade, gerar e colar (o que você digita não aparece);
+- **`g`** faz o login pelo navegador com o Git Credential Manager, quando ele está instalado, sem copiar nada;
+- **Enter** segue sem login: só repositórios públicos, nada é alterado, e o GitHub deixa 60 consultas por hora. Ela pergunta o seu usuário uma vez e lembra.
+
+O token fica no gerenciador de credenciais do sistema ou, se não houver, em `~/.ferramentas/token`, que só o seu usuário lê (a ferramenta pergunta antes). Cada ferramenta que altera o GitHub confere se o token tem a permissão de que precisa, e explica o que falta.
+
+```bash
+python ferramentas.py login            # quem está logado, de onde veio o login, permissões e consultas restantes
+python ferramentas.py login --trocar   # cola um token novo
+python ferramentas.py login --sair     # apaga o token guardado pela ferramenta
+```
 
 ## Parte 1 · seus repositórios no GitHub
 
@@ -32,7 +48,7 @@ A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura se
 | `branches` | Lista as branches já mescladas e apaga as que podem sair | Só depois do seu **SIM** |
 | `demos` | Abre o link de demo de cada repositório e avisa quem saiu do ar | Não (oferece preencher o campo "site") |
 | `backup` | Baixa e atualiza a branch principal de todos numa pasta | Só a sua pasta local |
-| `deps` | Vulnerabilidades e dependências velhas dos projetos JavaScript, sem precisar de Node | Não |
+| `deps` | Vulnerabilidades e dependências velhas dos projetos JavaScript e Python, sem precisar de Node nem de pip | Não |
 | `coautores` | Tira a coautoria do Claude do histórico | Só depois do seu **SIM** |
 
 <details>
@@ -42,7 +58,7 @@ A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura se
 - **branches**: compara cada branch com a principal e com os PRs. Só marca para apagar a que já está inteira na principal, ou cujo PR foi mesclado sem commits depois. Nunca mexe em branch protegida, com PR aberto, de deploy (`develop`, `staging`, `production`, `gh-pages`…) ou que publica o GitHub Pages, e confere de novo antes de apagar: se alguém mandou commit depois da análise, ela fica. Guarda o que apagou e desfaz com `--restaurar`. No fim, oferece ligar o "apagar branch após o merge" do GitHub.
 - **demos**: pega o link do campo "site", do README e do GitHub Pages, abre cada um e reconhece página de erro disfarçada (deploy apagado da Vercel, Pages desligado, app suspenso no Render/Heroku). Link para documentação de outro site ("site do MDN") não é confundido com a sua demo.
 - **backup**: clona só a branch principal e, nas próximas vezes, só puxa o que mudou. Se o histórico foi reescrito no GitHub, guarda a cópia velha em `.antigos` antes de baixar de novo; se você mexeu nos arquivos do backup, não atropela. Repositório renomeado no GitHub tem a pasta renomeada, sem baixar tudo de novo. Mantém um `INDICE.md` com o último commit de cada repositório, mesmo quando você roda só para alguns.
-- **deps**: lê `package-lock.json`, `pnpm-lock.yaml` ou `yarn.lock` direto do GitHub e consulta a mesma base de vulnerabilidades do `npm audit`, contando por pacote como ele. Mostra também o que está atrás de versão major e o que foi descontinuado.
+- **deps**: lê os lockfiles direto do GitHub, sem baixar nada. JavaScript: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` (yarn 1 e 2+) e `bun.lock`, conferidos na mesma base de vulnerabilidades do `npm audit` e contados por pacote como ele. Python: `poetry.lock`, `uv.lock`, `Pipfile.lock` e `requirements.txt` com versão fixa, conferidos na base [OSV](https://osv.dev) (a mesma do `pip-audit`), sem repetir o mesmo problema com dois nomes. Mostra também o que está atrás de versão major, o que foi descontinuado, e avisa quando um projeto Python não tem como ser auditado (sem lockfile nem `==`).
 - **coautores**: remove `Co-Authored-By: Claude`, `Claude-Session` e "Generated with Claude Code" das mensagens, e põe você como autor onde o Claude aparecia. Mesmos arquivos, datas e quantidade de commits; confere isso antes de enviar e guarda um backup de cada repositório.
 
 </details>
@@ -68,7 +84,7 @@ A parte do GitHub também usa **git** e **curl**. Na primeira vez ela procura se
 - **portas**: lista as portas abertas com o programa, a pasta do projeto, o framework (Vite, Next.js, Express…) e há quanto tempo está rodando. `portas 3000` mostra só uma; `--livre` acha a próxima porta livre. Processo do sistema não é encerrado.
 - **raiox**: junta o Lighthouse (quando há Node e Chrome/Edge) com uma análise própria de mais de 60 itens: textos alternativos, rótulos de formulário, hierarquia de títulos, `lang`, `og:` e `twitter:`, sitemap e robots.txt, cabeçalhos de segurança, certificado, cookies, conteúdo misto, links quebrados e rastreadores. Site em React/Vite é renderizado num navegador antes de ser analisado. `--paginas N` analisa também as páginas internas. Compara as notas com a última vez.
 - **peso**: lista cada arquivo que a página baixa, separa por tipo e compara com metas para o celular (página inteira, JavaScript, CSS, imagens, fontes). Mostra os arquivos mais pesados, quanto de cada JavaScript e CSS não é usado, o peso de cada terceiro (Google Fonts, Analytics, YouTube…) e quanto cada correção economiza. Diz também quanto CO₂ a página emite por visita.
-- **atualizar**: descobre os gerenciadores da máquina (winget, Chocolatey, Scoop, Homebrew, App Store, apt, dnf, pacman, AUR, zypper, Flatpak, Snap, Rust, Deno, Bun, npm, pnpm, pip, pipx, uv, cargo, extensões do gh, VS Code, VSCodium e Cursor), confere todos em paralelo e mostra o que tem versão nova, marcando quando a versão principal muda. Você escolhe quais atualizar. O sudo pede a senha uma vez só, e a saída completa de cada comando fica num log. O pip só mexe no que você instalou, não nas dependências, e não toca no Python do sistema.
+- **atualizar**: descobre os gerenciadores da máquina (winget, Chocolatey, Scoop, Homebrew, App Store, apt, dnf, pacman, AUR, zypper, Flatpak, Snap, Rust, Deno, Bun, npm, pnpm, pip, pipx, uv, cargo, extensões do gh, VS Code, VSCodium e Cursor), confere todos em paralelo e mostra o que tem versão nova, **só versões estáveis** (nada de alpha, beta, rc, nightly ou canary; quem já usa um beta continua vendo os betas daquele pacote), marcando quando a versão principal muda. Você escolhe quais atualizar. O sudo pede a senha uma vez só, a saída completa de cada comando fica num log, e as falhas mais comuns (npm global sem permissão, Python do sistema, falta de administrador, rede) vêm com o que fazer. O pip só mexe no que você instalou, não nas dependências, e não toca no Python do sistema.
 
 </details>
 
@@ -88,6 +104,7 @@ O `raiox` e o `peso` terminam gerando um `.md` com cada problema, onde ele apare
 | `--sim` | todas | Não pede confirmação |
 | `--ascii` | todas | Só caracteres simples, para terminal que mostra quadradinhos |
 | `--sem-cor` | todas | Sem cores (`NO_COLOR` também funciona) |
+| `--sem-login` | GitHub | Não usa token (nem pede um) |
 | `Repo1 Repo2` | GitHub | Só esses repositórios (padrão: todos os seus) |
 | `--forks` | GitHub | Inclui forks |
 | `--destino PASTA` | backup | Pasta do backup (padrão `~/backup-github`; ele lembra da última) |
@@ -110,7 +127,7 @@ Windows Terminal, cmd e PowerShell, Git Bash, Terminal do macOS, iTerm, VS Code 
 
 - Nada é apagado, reescrito ou atualizado sem você confirmar, e `--teste` deixa experimentar sem risco.
 - Antes de reescrever histórico, o `coautores` guarda um backup de cada repositório; o `branches` guarda o que apagou e desfaz com `--restaurar`.
-- O token nunca vai na linha de comando, onde apareceria na lista de processos: o `curl` recebe pela entrada padrão e o `git` por variável de ambiente.
+- O token nunca vai na linha de comando, onde apareceria na lista de processos: o `curl` recebe pela entrada padrão e o `git` por variável de ambiente. Guardado em arquivo, ele é criado já com permissão só do seu usuário.
 - Achados de segredos aparecem mascarados (`ghp_…a9`), na tela e no relatório.
 - O `raiox` e o `peso` só leem o site, como um navegador faria.
 
