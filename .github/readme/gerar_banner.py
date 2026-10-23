@@ -49,7 +49,7 @@ def banner():
     partes.append(f'<path d="M0 14a14 14 0 0 1 14-14h{W - 28}a14 14 0 0 1 14 14v26H0z" fill="{C["mantle"]}"/>')
     partes.append(f'<path d="M14 40v-28a6 6 0 0 1 6-6h214a6 6 0 0 1 6 6v28z" fill="{C["base"]}"/>')
     partes.append(f'<rect x="20" y="38" width="214" height="2" fill="{C["green"]}"/>')
-    partes.append(linha(34, 28, [('green', '▸ ', False), ('text', 'ferramentas-git', False)], 14))
+    partes.append(linha(34, 28, [('green', '▸ ', False), ('text', 'ferramentas', False)], 14))
     partes.append(linha(258, 28, [('overlay0', 'zsh', False)], 14))
     partes.append(linha(304, 28, [('overlay0', '+', False)], 15))
     partes.append(linha(W - 104, 28, [('overlay1', '─   □   ✕', False)], 14))
@@ -57,7 +57,7 @@ def banner():
 
     # comando
     partes.append(linha(48, 84, [('green', 'kessleru@github', True), ('overlay1', ':', False), ('blue', '~', True),
-                                 ('overlay1', '$ ', False), ('text', 'python ferramentas-git.py', False)]))
+                                 ('overlay1', '$ ', False), ('text', 'python ferramentas.py', False)]))
 
     # "logo" do neofetch: </> grande e o nome embaixo
     partes.append(pixels('</>', 56, 118, 17, [C['mauve'], C['green'], C['mauve']]))
@@ -65,7 +65,7 @@ def banner():
 
     # informações do neofetch
     x = 300
-    partes.append(linha(x, 130, [('green', 'ferramentas-git', True), ('overlay1', '@', False), ('mauve', 'kessleru', True)], 30))
+    partes.append(linha(x, 130, [('green', 'ferramentas', True), ('overlay1', '@', False), ('mauve', 'kessleru', True)], 30))
     partes.append(f'<rect x="{x}" y="144" width="432" height="2" fill="{C["surface1"]}"/>')
     infos = [
         ('mauve', 'github    ', 'segredos · branches · demos · backup · deps · coautores'),
@@ -91,7 +91,7 @@ def banner():
     y = H - 36
     partes.append(f'<path d="M0 {y}h{W}v22a14 14 0 0 1-14 14H14A14 14 0 0 1 0 {H - 14}z" fill="{C["mantle"]}"/>')
     partes.append(f'<path d="M0 {y}h176l12 18-12 18H14A14 14 0 0 1 0 {H - 14}z" fill="{C["green"]}"/>')
-    partes.append(linha(18, y + 23, [('crust', ' ferramentas-git', True)], 14))
+    partes.append(linha(18, y + 23, [('crust', ' ferramentas', True)], 14))
     partes.append(linha(206, y + 23, [('subtext0', '0:zsh*  1:segredos  2:raiox  3:peso', False)], 14))
     partes.append(f'<path d="M{W - 320} {y}h320v22a14 14 0 0 1-14 14H{W - 320}l-12-18z" fill="{C["surface0"]}"/>')
     partes.append(linha(W - 306, y + 23, [('mauve', ' git:main ', False), ('overlay1', '│', False),
@@ -106,7 +106,7 @@ def banner():
     sobre = (f'<rect x="0" y="40" width="{W}" height="{H - 76}" fill="url(#brilho)"/>'
              f'<rect x="0" y="40" width="{W}" height="{H - 76}" fill="url(#crt)"/>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
-            f'aria-label="ferramentas-git: janela de terminal com o logo e a lista das onze ferramentas">'
+            f'aria-label="ferramentas: janela de terminal com o logo e a lista das onze ferramentas">'
             f'{fundo}<g clip-path="url(#moldura)">{"".join(partes[:9])}{sobre}{"".join(partes[9:])}'
             f'<rect width="{W}" height="{H}" rx="14" fill="none" stroke="{C["surface0"]}" stroke-width="2"/></g></svg>\n')
 
