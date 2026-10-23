@@ -714,7 +714,7 @@ class GitHub:
     API = 'https://api.github.com'
 
     def __init__(self, term, sem_login=False, estado=None):
-        self.t, self.token, self.login, self.origem, self.escopos = term, None, None, None, None
+        self.t, self.token, self.login, self.origem, self.escopos, self.perfil = term, None, None, None, None, None
         self.estado = estado if estado is not None else {}
         if not shutil.which('curl'):
             raise SystemExit('ERRO: preciso do curl instalado.')
@@ -869,7 +869,8 @@ class GitHub:
                 msg = ''
             return traduz_erro_github(st, msg) or f'HTTP {st}'
         try:
-            self.login = json.loads(dados)['login']
+            self.perfil = json.loads(dados)
+            self.login = self.perfil['login']
         except (ValueError, KeyError, TypeError):
             return 'resposta inesperada do GitHub'
         # token "classic" diz as permissões no cabeçalho; o "fine-grained" não diz (escopos = None)
@@ -999,49 +1000,243 @@ def escolhe_repos(ctx, arquivados=True, precisa_login=False):
     return lista
 
 
-def ferramenta_login(ctx):
-    t, args = ctx.t, ctx.args
-    if args.sair:
-        apagou = []
-        if _arquivo_token().exists():
-            _arquivo_token().unlink()
-            apagou.append(caminho_curto(_arquivo_token()))
-        r = roda(['git', 'credential', 'reject'], entrada=b'protocol=https\nhost=github.com\n\n')
-        if r.returncode == 0 and texto(roda(['git', 'config', 'credential.helper']).stdout).strip():
+def _apaga_login(t):
+    apagou = []
+    if _arquivo_token().exists():
+        _arquivo_token().unlink()
+        apagou.append(caminho_curto(_arquivo_token()))
+    if texto(roda(['git', 'config', 'credential.helper']).stdout).strip():
+        if roda(['git', 'credential', 'reject'], entrada=b'protocol=https\nhost=github.com\n\n').returncode == 0:
             apagou.append('gerenciador de credenciais do git')
-        t.ok('login apagado de: ' + ', '.join(apagou) if apagou else 'não havia login guardado pela ferramenta.')
-        if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
-            t.aviso('A variável GH_TOKEN/GITHUB_TOKEN continua definida no seu terminal.')
-        return 0
-    if args.trocar:
-        if _arquivo_token().exists():
-            _arquivo_token().unlink()
-        gh = GitHub(t, sem_login=True, estado=ctx.estado)
-        if not gh.pede_token():
-            t.aviso('nada mudou.')
-            return 1
-        ctx._gh = gh
-    gh = ctx.gh
+    t.ok('login apagado de: ' + ', '.join(apagou) if apagou else 'não havia login guardado pela ferramenta.')
+    if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
+        t.aviso('A variável GH_TOKEN/GITHUB_TOKEN continua definida no seu terminal: tire-a para sair de vez.')
+
+
+def _troca_login(ctx):
+    t = ctx.t
+    gh = GitHub(t, sem_login=True, estado=ctx.estado)
+    if not gh.pede_token():
+        t.aviso('nada mudou.')
+        return False
+    gh.dono = gh.login
+    ctx._gh = gh
+    t.ok(f'agora conectado como {t.p(gh.login, "verde")}')
+    return True
+
+
+def mostra_perfil(ctx):
+    t, gh = ctx.t, ctx.gh
     if not gh.token:
-        return 1
-    t.escreve()
-    t.titulo('login atual', caixa=True)
-    t.item('●', 'verde', 'usuário', t.p(gh.login, 'texto'), recuo=2)
-    t.item('●', 'verde', 'vem de', t.p(gh.origem or '?', 'sub'), recuo=2)
+        t.paragrafo('Sem login: as ferramentas do GitHub só veem repositórios públicos e não alteram nada.', 2, 'apagado')
+        if gh.dono:
+            t.item('●', 'azul', 'usuário (sem login)', t.p(gh.dono, 'texto'), alvo=f'https://github.com/{gh.dono}')
+        return False
+    perfil = gh.perfil or {}
+    t.titulo('perfil', caixa=True)
+    nome = perfil.get('name') or gh.login
+    t.escreve('  ' + t.link(t.p(nome, 'texto', True), perfil.get('html_url')) + t.p(f'  @{gh.login}', 'apagado'))
+    if perfil.get('bio'):
+        t.paragrafo(perfil['bio'], 2, 'sub')
+    numeros = []
+    if perfil.get('public_repos') is not None:
+        privados = perfil.get('total_private_repos')
+        numeros.append(f'{perfil["public_repos"]} repositórios públicos' + (f' · {privados} privados' if privados is not None else ''))
+    if perfil.get('followers') is not None:
+        numeros.append(f'{pl(perfil["followers"], "seguidor", "seguidores")} · seguindo {perfil.get("following", 0)}')
+    for n in numeros:
+        t.escreve('  ' + t.p(n, 'sub'))
+    if perfil.get('created_at'):
+        t.escreve('  ' + t.p(f'no GitHub desde {perfil["created_at"][:4]}', 'apagado'))
+    t.titulo('login', caixa=True)
+    t.item('●', 'verde', 'vem de', t.p(gh.origem or '?', 'sub'))
     if gh.escopos is None:
-        t.item('●', 'azul', 'permissões', t.p('token fine-grained (veja no GitHub)', 'sub'), recuo=2)
+        t.item('●', 'azul', 'permissões', t.p('token fine-grained (veja no GitHub)', 'sub'))
     else:
         falta = gh.falta_permissao()
         t.item('●' if not falta else '!', 'verde' if not falta else 'amarelo', 'permissões',
-               t.p(', '.join(sorted(gh.escopos)) or 'nenhuma', 'sub'), recuo=2)
+               t.p(', '.join(sorted(gh.escopos)) or 'nenhuma', 'sub'))
         if falta:
-            t.paragrafo(f'falta {", ".join(sorted(falta))}: branches, coautores e o preenchimento do campo "site" não vão funcionar',
-                        4, 'amarelo')
+            t.paragrafo(f'falta {", ".join(sorted(falta))}: branches, coautores e o preenchimento do campo "site" '
+                        'não vão funcionar', 4, 'amarelo')
     cab = {}
     gh.requisita('/rate_limit', cabecalhos=cab)
     if cab.get('x-ratelimit-remaining'):
-        t.item('●', 'verde', 'consultas restantes', t.p(f'{cab["x-ratelimit-remaining"]} de {cab.get("x-ratelimit-limit", "?")} nesta hora', 'sub'), recuo=2)
-    return 0
+        t.item('●', 'verde', 'consultas restantes', t.p(f'{cab["x-ratelimit-remaining"]} de {cab.get("x-ratelimit-limit", "?")}', 'sub'))
+    t.fecha_caixa()
+    return True
+
+
+def ferramenta_login(ctx):
+    t, args = ctx.t, ctx.args
+    if getattr(args, 'sair', False):
+        _apaga_login(t)
+        return 0
+    if getattr(args, 'trocar', False):
+        if _arquivo_token().exists():
+            _arquivo_token().unlink()
+        if not _troca_login(ctx):
+            return 1
+    logado = mostra_perfil(ctx)
+    if not t.interativo or args.sim:
+        return 0 if logado else 1
+    while True:
+        t.escreve()
+        opcoes = ('t = trocar o token · s = sair (apagar o login) · Enter = voltar' if logado
+                  else 'e = entrar (colar um token ou abrir o navegador) · Enter = voltar')
+        t.paragrafo(opcoes, 2, 'apagado')
+        r = t.pergunta('login').strip().lower()
+        if r in ('t', 'e', 'trocar', 'entrar'):
+            if _troca_login(ctx):
+                logado = mostra_perfil(ctx)
+        elif r in ('s', 'sair') and logado:
+            if confirma(t, args, 'Apagar o login guardado neste computador?'):
+                _apaga_login(t)
+                ctx._gh = None
+                return 0
+        else:
+            return 0 if logado else 1
+
+
+# ═══════════════════════════════ configuração ═══════════════════════════════
+
+# chave → (rótulo, tipo, opções ou padrão, ajuda); "escolha" alterna entre as opções
+CONFIG = [
+    ('usuario_github', 'usuário do GitHub', 'texto', '', 'usado sem login (com login, vale o do token)'),
+    ('backup_destino', 'pasta do backup', 'pasta', str(Path.home() / 'backup-github'), 'onde o backup guarda os repositórios'),
+    ('cores', 'cores', 'escolha', ['automático', 'sem cor'], '"sem cor" é o mesmo que --sem-cor em toda ferramenta'),
+    ('simbolos', 'símbolos', 'escolha', ['automático', 'simples'], '"simples" é o --ascii, para terminal que mostra quadradinhos'),
+    ('dispositivo', 'raio-x e peso medem como', 'escolha', ['celular', 'computador'], 'o Lighthouse simula esse aparelho'),
+    ('faxina_dias', 'faxina: parado depois de', 'numero', 30, 'dias sem mexer para o projeto contar como parado'),
+    ('atualizar_pular', 'atualizar sempre pula', 'texto', '', 'grupos ou gerenciadores separados por vírgula (ex.: editores,pip)'),
+]
+CONFIG_CLI = {'usuario': 'usuario_github', 'backup': 'backup_destino', 'cores': 'cores', 'simbolos': 'simbolos',
+              'dispositivo': 'dispositivo', 'faxina-dias': 'faxina_dias', 'atualizar-pular': 'atualizar_pular'}
+
+
+def config(chave, padrao=None):
+    """Lê uma preferência salva (as mesmas chaves do estado.json)."""
+    estado = carrega_estado()
+    valor = estado.get(chave)
+    return padrao if valor in (None, '') else valor
+
+
+def _valor_config(estado, chave, tipo, padrao):
+    v = estado.get(chave)
+    if v in (None, ''):
+        v = padrao[0] if tipo == 'escolha' else padrao
+    return v
+
+
+def _mostra_valor(v, tipo):
+    if tipo == 'pasta':
+        return caminho_curto(v)
+    if tipo == 'numero':
+        return f'{v} dias'
+    return str(v) if v not in (None, '') else '(nada)'
+
+
+def _define(estado, chave, tipo, opcoes, valor):
+    if tipo == 'numero':
+        if not str(valor).isdigit() or int(valor) < 1:
+            raise ValueError('use um número de dias maior que zero')
+        valor = int(valor)
+    elif tipo == 'escolha':
+        if valor not in opcoes:
+            raise ValueError('opções: ' + ', '.join(opcoes))
+    elif tipo == 'pasta' and valor:
+        valor = str(Path(valor).expanduser())
+    estado[chave] = valor
+    salva_estado(estado)
+
+
+def tamanho_casa():
+    return tamanho_pasta(CASA) if CASA.exists() else 0
+
+
+def ferramenta_config(ctx):
+    t, args, estado = ctx.t, ctx.args, ctx.estado
+    if getattr(args, 'chave', None):
+        chave = CONFIG_CLI.get(args.chave)
+        if not chave:
+            t.erro(f'"{args.chave}" não é uma configuração. Existem: {", ".join(CONFIG_CLI)}')
+            return 1
+        _, rotulo, tipo, opcoes, _ = next(c for c in CONFIG if c[0] == chave)
+        try:
+            _define(estado, chave, tipo, opcoes, args.valor if args.valor is not None else '')
+        except ValueError as e:
+            t.erro(str(e))
+            return 1
+        t.ok(f'{rotulo} → {_mostra_valor(_valor_config(estado, chave, tipo, opcoes), tipo)}')
+        return 0
+    while True:
+        t.titulo('preferências', caixa=True)
+        for i, (chave, rotulo, tipo, opcoes, _) in enumerate(CONFIG, 1):
+            v = _mostra_valor(_valor_config(estado, chave, tipo, opcoes), tipo)
+            if chave == 'usuario_github' and ctx._gh is not None and ctx._gh.login:
+                v = f'{ctx._gh.login} (do login)'
+            _linha_config(t, i, rotulo, corta(v, t.largura - 8), 'sub')
+        n = len(CONFIG) + 1
+        _linha_config(t, n, 'limpar relatórios e cache', corta_esq(f'{humano(tamanho_casa())} em {caminho_curto(CASA)}',
+                                                                    t.largura - 8), 'apagado')
+        t.fecha_caixa()
+        if not t.interativo:
+            t.paragrafo('Para mudar sem menu: python ferramentas.py config CHAVE VALOR (chaves: '
+                        + ', '.join(CONFIG_CLI) + ')', 2, 'apagado')
+            return 0
+        t.escreve()
+        t.paragrafo('número para mudar · Enter = voltar', 2, 'apagado')
+        r = t.pergunta('config').strip()
+        if not r.isdigit() or not 1 <= int(r) <= n:
+            return 0
+        if int(r) == n:
+            _limpa_dados(t, args)
+            continue
+        chave, rotulo, tipo, opcoes, ajuda = CONFIG[int(r) - 1]
+        atual = _valor_config(estado, chave, tipo, opcoes)
+        if tipo == 'escolha':
+            novo = opcoes[(opcoes.index(atual) + 1) % len(opcoes)] if atual in opcoes else opcoes[0]
+        else:
+            t.paragrafo(f'{ajuda}. Agora: {_mostra_valor(atual, tipo)}. Enter = manter, "-" = voltar ao padrão', 2, 'apagado')
+            novo = t.pergunta(rotulo).strip()
+            if not novo:
+                continue
+            if novo == '-':
+                estado.pop(chave, None)
+                salva_estado(estado)
+                continue
+        try:
+            _define(estado, chave, tipo, opcoes, novo)
+            t.ok(f'{rotulo} → {_mostra_valor(estado[chave], tipo)}')
+            if chave in ('cores', 'simbolos'):
+                t.paragrafo('vale a partir da próxima vez que abrir a ferramenta', 4, 'apagado')
+        except ValueError as e:
+            t.erro(str(e))
+
+
+def _linha_config(t, n, rotulo, valor, cor):
+    esq = f'  {t.p(f"{n:>2}", "verde", True)}  {t.p(rotulo, "texto")}'
+    if vlen(esq) + 2 + len(valor) <= t.largura:
+        t.escreve(esq + ' ' * (t.largura - vlen(esq) - len(valor)) + t.p(valor, cor))
+    else:  # tela estreita: o valor desce para a linha de baixo
+        t.escreve(esq)
+        t.escreve(' ' * 8 + t.p(valor, cor))
+
+
+def _limpa_dados(t, args):
+    # backups (do coautores), cofre do token e estado ficam: são coisas que não se recriam
+    pastas = [CASA / p for p in ('relatorios', 'cache', 'tmp', 'raiox', 'peso', 'atualizar')]
+    existentes = [p for p in pastas if p.exists()]
+    total = sum(tamanho_pasta(p) for p in existentes)
+    if not existentes:
+        t.ok('nada para limpar.')
+        return
+    t.paragrafo('Sai: relatórios, cache dos repositórios, histórico do raio-x e do peso, logs do atualizar. '
+                'Ficam: backups do coautores, login e preferências.', 2, 'apagado')
+    if confirma(t, args, f'Apagar {humano(total)} de relatórios e cache?'):
+        for p in existentes:
+            shutil.rmtree(p, ignore_errors=True)
+        t.ok(f'{humano(total)} liberados.')
 
 
 def em_paralelo(t, itens, funcao, rotulo, nome=lambda x: x['name'], fios=6):
@@ -2863,6 +3058,8 @@ def espaco_livre(pontos):
 
 
 def ferramenta_faxina(t, args):
+    if args.dias is None:
+        args.dias = int(config('faxina_dias', 30))
     raizes = [os.path.abspath(os.path.expanduser(p)) for p in (args.pastas or [str(Path.home())])]
     for r in raizes:
         if not os.path.isdir(r):
@@ -4380,6 +4577,7 @@ def entrega_resumo_ia(t, args, resumo, nome):
 
 
 def ferramenta_raiox(t, args):
+    args.desktop = args.desktop or config('dispositivo') == 'computador'
     from urllib.parse import urlparse
     url = args.url.strip()
     if not re.match(r'https?://', url):
@@ -4955,6 +5153,7 @@ def barra_peso(t, fracao, larg, cor):
 
 
 def ferramenta_peso(t, args):
+    args.desktop = args.desktop or config('dispositivo') == 'computador'
     url = args.url.strip()
     if not re.match(r'https?://', url):
         url = ('http://' if re.match(r'(localhost|127\.0\.0\.1)', url) else 'https://') + url
@@ -5686,7 +5885,8 @@ def executa_vivo(cmd, log, pr, env=None):
 
 def ferramenta_atualizar(t, args):
     escolha = {x.strip().lower() for x in (args.so or '').split(',') if x.strip()}
-    pular = {x.strip().lower() for x in (args.pular or '').split(',') if x.strip()}
+    pular = {x.strip().lower() for x in (args.pular if args.pular is not None else config('atualizar_pular', '')).split(',')
+             if x.strip()}
     fontes = [f for f in fontes_do_pc() if (not escolha or f['id'] in escolha or f['grupo'] in escolha)
               and f['id'] not in pular and f['grupo'] not in pular]
     if not fontes:
@@ -5841,7 +6041,7 @@ def ferramenta_atualizar(t, args):
 # ███████████████████████████████████████████████████████████████████████████
 #
 #   PARTE 3 · MENU E ENTRADA
-#   as duas partes num menu só, e os comandos de linha
+#   as duas partes e o perfil num menu só, e os comandos de linha
 #
 # ███████████████████████████████████████████████████████████████████████████
 
@@ -5862,10 +6062,14 @@ GRUPOS = [
         ('peso', 'peso.sh', 'o que a página carrega', 'ferramenta_peso'),
         ('atualizar', 'atualizar.sh', 'atualiza tudo do PC', 'ferramenta_atualizar'),
     ]),
+    ('perfil e configuração', 'conta', [
+        ('login', 'login.sh', 'seu perfil e o login do GitHub', 'ferramenta_login'),
+        ('config', 'config.sh', 'preferências da ferramenta', 'ferramenta_config'),
+    ]),
 ]
 FERRAMENTAS = [(cmd, arq, desc, funcao, grupo) for _, grupo, itens in GRUPOS for cmd, arq, desc, funcao in itens
                if funcao in globals()]
-PRECISA = {'segredos': ('git', 'curl'), 'branches': ('curl',), 'demos': ('curl',), 'backup': ('git', 'curl'),
+PRECISA = {'login': ('curl',), 'segredos': ('git', 'curl'), 'branches': ('curl',), 'demos': ('curl',), 'backup': ('git', 'curl'),
            'deps': ('curl',), 'coautores': ('git', 'curl'), 'raiox': ('curl',), 'peso': ('curl',)}
 
 
@@ -5897,7 +6101,7 @@ def roda_ferramenta(ctx, args, mostra_descricao=True):
             return 1
     inicio = time.time()
     try:
-        if grupo == 'repos':
+        if grupo in ('repos', 'conta'):
             ctx.args = args
             cod = globals()[funcao](ctx)
         else:
@@ -5905,8 +6109,9 @@ def roda_ferramenta(ctx, args, mostra_descricao=True):
     except KeyboardInterrupt:
         t.fim('interrompido', 'erro')
         return 130
-    ctx.estado[cmd] = agora_iso()
-    salva_estado(ctx.estado)
+    if grupo != 'conta':
+        ctx.estado[cmd] = agora_iso()
+        salva_estado(ctx.estado)
     dur = time.time() - inicio
     t.fim(('concluído em ' if not cod else 'terminou com pendências · ') + _duracao(dur), 'ok' if not cod else 'aviso')
     return cod or 0
@@ -5939,13 +6144,16 @@ def monta_parser():
     bk.add_argument('--destino', help='pasta do backup (padrão ~/backup-github; ele lembra da última)')
     sub.add_parser('deps', parents=[depois, de_repos], help='[GitHub] vulnerabilidades e dependências velhas')
     sub.add_parser('coautores', parents=[depois, de_repos], help='[GitHub] tira a coautoria do Claude do histórico')
-    lg = sub.add_parser('login', parents=[depois], help='[GitHub] mostra, troca ou apaga o login guardado')
+    lg = sub.add_parser('login', parents=[depois], help='[perfil] seu perfil e o login do GitHub (ver, trocar, sair)')
     lg.add_argument('--trocar', action='store_true', help='cola um token novo no lugar do atual')
     lg.add_argument('--sair', action='store_true', help='apaga o token guardado pela ferramenta')
+    cf = sub.add_parser('config', parents=[depois], help='[perfil] preferências (sem nada: mostra e deixa mudar)')
+    cf.add_argument('chave', nargs='?', help='usuario, backup, cores, simbolos, dispositivo, faxina-dias, atualizar-pular')
+    cf.add_argument('valor', nargs='?', help='valor novo (vazio volta ao padrão)')
 
     f = sub.add_parser('faxina', parents=[depois], help='[PC] libera espaço de projetos parados')
     f.add_argument('pastas', nargs='*', help='onde procurar (padrão: sua pasta pessoal)')
-    f.add_argument('--dias', type=int, default=30, help='dias sem mexer para contar como parado (padrão 30)')
+    f.add_argument('--dias', type=int, default=None, help='dias sem mexer para contar como parado (padrão 30, ou o da config)')
     po = sub.add_parser('portas', parents=[depois], help='[PC] quem está usando cada porta')
     po.add_argument('porta', nargs='?', type=int, help='mostra só essa porta e oferece encerrar')
     po.add_argument('--matar', action='store_true', help='encerra o processo da porta (pede confirmação)')
@@ -5993,7 +6201,7 @@ def menu(ctx, parser, args):
             for cmd, _, desc, _, _ in itens:
                 num += 1
                 por_numero[str(num)] = cmd
-                quando = ha_quanto_iso(ctx.estado.get(cmd, ''))
+                quando = ha_quanto_iso(ctx.estado.get(cmd, '')) if grupo != 'conta' else ''
                 esq = f'  {t.p(f"{num:>2}", "verde", True)}  {t.p(f"{cmd:<10}", "texto")} {t.p(corta(desc, t.largura - 17), "sub")}'
                 if quando and vlen(esq) + len(quando) + 2 <= t.largura:
                     esq += ' ' * (t.largura - vlen(esq) - len(quando)) + t.p(quando, 'apagado')
@@ -6053,14 +6261,12 @@ def menu(ctx, parser, args):
 def main():
     parser = monta_parser()
     args = parser.parse_args()
+    # preferências da config valem como se as opções tivessem sido digitadas
+    args.ascii = args.ascii or config('simbolos') == 'simples'
+    args.sem_cor = args.sem_cor or config('cores') == 'sem cor'
     t = Terminal(args.ascii, args.sem_cor)
     ctx = Ctx(args, t)
     try:
-        if args.comando == 'login':
-            t.cabecalho('login')
-            cod = ferramenta_login(ctx)
-            t.fim('pronto' if not cod else 'sem login', 'ok' if not cod else 'aviso')
-            return cod
         if args.comando:
             t.cabecalho(args.comando)
             return roda_ferramenta(ctx, args)
