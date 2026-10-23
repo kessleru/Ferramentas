@@ -494,7 +494,8 @@ class GitHub:
                 cfg.append(f'header = "Authorization: Bearer {self.token}"')
         if metodo != 'GET':
             cfg.append(f'request = "{metodo}"')
-        args = ['curl', '-sS', '-K', '-', '--max-time', str(tempo), '-w', '\n%{http_code}']
+        # -L: repositório renomeado responde 301 apontando para o endereço novo
+        args = ['curl', '-sS', '-L', '-K', '-', '--max-time', str(tempo), '-w', '\n%{http_code}']
         arq_corpo = None
         if corpo is not None:
             CASA.mkdir(parents=True, exist_ok=True)
@@ -598,9 +599,10 @@ class GitHub:
             def um(n):
                 full = n if '/' in n else f'{DONO}/{n}'
                 try:
-                    return self.json(f'/repos/{full}')
+                    r = self.json(f'/repos/{full}')
                 except ErroAPI as e:
                     return {'_erro': f'{full}: {e}'}
+                return r if isinstance(r, dict) and 'name' in r else {'_erro': f'{full}: resposta inesperada do GitHub'}
 
             with ThreadPoolExecutor(8) as ex:
                 res = list(ex.map(um, nomes))
