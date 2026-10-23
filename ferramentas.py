@@ -145,20 +145,22 @@ PALETA = {  # Catppuccin Frappé, a paleta do kessleru.com.br
     'superficie': (81, 87, 109), 'fundo': (65, 69, 89),
     'verde': (166, 209, 137), 'vermelho': (231, 130, 132), 'amarelo': (229, 200, 144),
     'pessego': (239, 159, 118), 'azul': (140, 170, 238), 'roxo': (202, 158, 230),
+    'teal': (129, 200, 190), 'escuro': (35, 38, 52),
 }
 CORES16 = {'texto': 97, 'sub': 37, 'apagado': 90, 'superficie': 90, 'fundo': 90, 'verde': 92, 'vermelho': 91,
-           'amarelo': 93, 'pessego': 33, 'azul': 94, 'roxo': 95}
+           'amarelo': 93, 'pessego': 33, 'azul': 94, 'roxo': 95, 'teal': 96, 'escuro': 30}
 LOGO_SIMBOLO = [' ▄▀   █ ▀▄ ', '▀▄  ▄▀   ▄▀', '  ▀ ▀   ▀  ']
 LOGO_NOME = ['█ █ █▀▀ █▀▀ █▀▀ █   █▀▀ █▀▄ █ █',
              '█▀▄ █▀  ▀▀█ ▀▀█ █   █▀  █▀▄ █ █',
              '▀ ▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀']
 TROCA_SIMPLES = str.maketrans({'✓': '+', '✗': 'x', '↳': '>', '↻': '*', '↑': '^', '→': '->', '●': '•', '◆': '♦',
-                               '◇': '♦', '┌': '+', '└': '+', '›': '>'})
+                               '◇': '♦', '›': '>', '╮': '┐', '╯': '┘'})  # ┌ └ ├ │ existem na fonte do console antigo
 TROCA_ASCII = str.maketrans({'✓': '+', '✗': 'x', '·': '.', '…': '...', '─': '-', '●': '*', '◆': '>', '■': '#',
                              '█': '#', '▀': '"', '▄': '_', '↳': '>', '↑': '^', '↻': '*', '→': '->', '—': '-',
                              '•': '*', '♦': '>', '↓': 'v', '₂': '2', '🔒': '', '≈': '~', '×': 'x',
-                             '◇': '*', '│': '|', '┌': '+', '└': '+', '›': '>'})
-ANSI = re.compile(r'\033\[[0-9;]*m')
+                             '◇': '*', '│': '|', '┌': '+', '└': '+', '›': '>', '╮': '+', '╯': '+', '├': '+'})
+# cor e link clicável (OSC 8) não ocupam espaço na tela
+ANSI = re.compile(r'\033\[[0-9;]*m|\033\]8;;[^\033]*\033\\')
 
 
 def vlen(s):
@@ -259,12 +261,15 @@ class Terminal:
             self.nivel = 'simples'
         else:
             self.nivel = 'pleno'
-        # a guia lateral ocupa uma coluna a mais: o conteúdo é montado para `largura` e cabe na tela
-        self.largura = max(36, min(shutil.get_terminal_size((72, 24)).columns - 2, 78))
+        self.links = self.cor and self.tty and _aceita_links(env)
+        # a guia lateral e os dois espaços depois dela ocupam duas colunas: o conteúdo é montado
+        # para `largura` e cabe na tela
+        self.largura = max(36, min(shutil.get_terminal_size((72, 24)).columns - 3, 78))
         self.trava = threading.RLock()
         self.vivo_txt = ''
         self.guia = False
         self._vazia = False
+        self._caixa = None
 
     def _adapta(self, txt):
         if self.nivel == 'pleno':
@@ -274,14 +279,16 @@ class Terminal:
         import unicodedata
         return unicodedata.normalize('NFKD', txt.translate(TROCA_ASCII)).encode('ascii', 'ignore').decode()
 
-    def _cod(self, nome, fundo=False):
-        r, g, b = PALETA[nome]
+    def _rgb(self, rgb, fundo=False, nome=None):
         if self.modo_cor == 16:
-            return f'\033[{CORES16[nome] + (10 if fundo else 0)}m'
+            return f'\033[{CORES16.get(nome, 37) + (10 if fundo else 0)}m'
         camada = 48 if fundo else 38
         if self.modo_cor == 24:
-            return f'\033[{camada};2;{r};{g};{b}m'
-        return f'\033[{camada};5;{_xterm256(r, g, b)}m'
+            return f'\033[{camada};2;{rgb[0]};{rgb[1]};{rgb[2]}m'
+        return f'\033[{camada};5;{_xterm256(*rgb)}m'
+
+    def _cod(self, nome, fundo=False):
+        return self._rgb(PALETA[nome], fundo, nome)
 
     def p(self, txt, cor=None, negrito=False, fundo=None):
         if not self.cor or (cor is None and not negrito and fundo is None):
@@ -289,13 +296,60 @@ class Terminal:
         s = ('\033[1m' if negrito else '') + (self._cod(cor) if cor else '') + (self._cod(fundo, True) if fundo else '')
         return s + str(txt) + '\033[0m'
 
+    def degrade(self, txt, cores, negrito=False):
+        """Pinta cada coluna com uma cor entre as da lista (o logo, por exemplo)."""
+        if not self.cor or self.modo_cor == 16:
+            return self.p(txt, cores[0], negrito)
+        pontos = [PALETA[c] for c in cores]
+        saida, n = [], max(len(txt) - 1, 1)
+        for i, ch in enumerate(txt):
+            if ch == ' ':
+                saida.append(ch)
+                continue
+            pos = i / n * (len(pontos) - 1)
+            a, b = pontos[int(pos)], pontos[min(int(pos) + 1, len(pontos) - 1)]
+            f = pos - int(pos)
+            rgb = tuple(round(x + (y - x) * f) for x, y in zip(a, b))
+            saida.append(self._rgb(rgb) + ch)
+        return ('\033[1m' if negrito else '') + ''.join(saida) + '\033[0m'
+
+    def selo(self, txt, cor):
+        """Etiqueta com fundo colorido, como os PASS/FAIL do Vitest; sem cor vira [TEXTO]."""
+        if not self.cor:
+            return f'[{txt}]'
+        return self.p(f' {txt} ', 'escuro', True, fundo=cor)
+
+    def link(self, txt, alvo):
+        # OSC 8: o texto vira clicável nos terminais que entendem; nos outros, fica só o texto
+        if not self.links or not alvo:
+            return txt
+        if not re.match(r'[a-z]+://', str(alvo)):
+            try:
+                alvo = Path(alvo).resolve().as_uri()
+            except (OSError, ValueError):
+                return txt
+        return f'\033]8;;{alvo}\033\\{txt}\033]8;;\033\\'
+
+    def caminho(self, arq, n=None):
+        return self.link(caminho_curto(arq, n), arq)
+
+    def titulo_janela(self, txt):
+        if self.tty and self.cor:
+            sys.stdout.write(f'\033]0;{txt}\007')
+
     def _com_guia(self, txt):
         # dentro de um bloco, a linha ganha a guia lateral no lugar dos dois espaços do começo
         if not self.guia:
             return txt
-        return ' ' + self.p('│', 'superficie') + (' ' + txt[2:] if txt.startswith('  ') else ' ' + txt if txt else '')
+        barra = ' ' + self.p('│', 'superficie')
+        if not txt:
+            return barra
+        return barra + '  ' + (txt[2:] if txt.startswith('  ') else txt)
 
     def escreve(self, txt='', guia=True):
+        if self._caixa is not None and guia:
+            self._caixa['linhas'].append(txt)
+            return
         vazia = not ANSI.sub('', txt).strip()
         if vazia and self._vazia:
             return  # duas linhas em branco seguidas viram uma
@@ -309,12 +363,13 @@ class Terminal:
                 sys.stdout.write(self.vivo_txt)
             sys.stdout.flush()
 
-    def vivo(self, txt):
+    def vivo(self, txt, guia=True):
         if not self.tty:
             return
         with self.trava:
             # linha viva mais larga que a tela quebra, e o \r só apaga o último pedaço: corta antes
-            self.vivo_txt = self._adapta(corta_visivel(self._com_guia(txt), self.largura + 1))
+            linha = self._com_guia(txt) if guia else txt
+            self.vivo_txt = self._adapta(corta_visivel(linha, self.largura + 2))
             sys.stdout.write('\r\033[2K' + self.vivo_txt)
             sys.stdout.flush()
 
@@ -329,30 +384,65 @@ class Terminal:
         self.escreve(guia=False)
         if self.largura >= 46 and self.nivel != 'ascii':
             for s, n in zip(LOGO_SIMBOLO, LOGO_NOME):
-                self.escreve('  ' + self.p(s, 'texto') + '   ' + self.p(n, 'verde'), guia=False)
+                self.escreve('  ' + self.p(s, 'texto') + '   ' + self.degrade(n, ('verde', 'teal', 'azul')), guia=False)
         else:
-            self.escreve('  ' + self.p('</>', 'texto', True) + '  ' + self.p('KESSLERU', 'verde', True), guia=False)
+            self.escreve('  ' + self.p('</>', 'texto', True) + '  ' + self.degrade('KESSLERU', ('verde', 'teal', 'azul'), True), guia=False)
 
-    def cabecalho(self, caminho):
+    def cabecalho(self, caminho, extra=''):
         """Abre um bloco: a primeira linha, com o nome da ferramenta, e a guia lateral daí para baixo."""
         self.escreve(guia=False)
         marca = self.p('┌', 'superficie')
-        nome = self.p(' ferramentas ', 'texto', True) if caminho == 'início' else (
-            self.p('ferramentas', 'apagado') + self.p(' › ', 'fundo') + self.p(f' {caminho} ', 'texto', True, fundo='fundo'))
-        self.escreve(' ' + marca + ' ' + nome, guia=False)
+        if caminho == 'início':
+            nome = self.p('ferramentas', 'texto', True)
+            self.titulo_janela('ferramentas')
+        else:
+            nome = self.p('ferramentas', 'apagado') + self.p(' › ', 'fundo') + self.p(f' {caminho} ', 'texto', True, fundo='fundo')
+            self.titulo_janela(f'ferramentas › {caminho}')
+        self.escreve(' ' + marca + '  ' + nome + (self.p('  ' + extra, 'apagado') if extra else ''), guia=False)
         self.guia = True
         self.escreve()
 
-    def fim(self, txt=''):
-        """Fecha o bloco aberto pelo cabeçalho."""
+    def fim(self, txt='', nivel='ok'):
+        """Fecha o bloco aberto pelo cabeçalho; o ícone diz como terminou."""
+        self.fecha_caixa()
         if not self.guia:
             return
         self.para_vivo()
+        self.escreve()
         self.guia = False
-        self.escreve(' ' + self.p('└', 'superficie') + ' ' + self.p(txt, 'apagado'), guia=False)
+        icone = {'ok': self.p('✓', 'verde') if self.nivel != 'ascii' else '', 'aviso': self.p('!', 'amarelo', True),
+                 'erro': self.p('■', 'vermelho'), 'nada': ''}[nivel]
+        self.escreve(' ' + self.p('└', 'superficie') + '  ' + (icone + ' ' if icone else '') + self.p(txt, 'apagado'), guia=False)
 
-    def titulo(self, txt):
-        self.escreve(' ' + self.p('◇', 'verde') + ' ' + self.p(txt, 'texto', True), guia=False)
+    def titulo(self, txt, caixa=False):
+        self.fecha_caixa()
+        if caixa and self.guia and self.nivel != 'ascii':
+            # o resumo vai numa caixa (como o "note" do Clack); o conteúdo é montado mais estreito
+            self._caixa = {'titulo': txt, 'linhas': []}
+            self.largura -= 3
+            return
+        self.escreve()
+        self.escreve(' ' + self.p('◇', 'verde') + '  ' + self.p(txt, 'texto', True), guia=False)
+
+    def fecha_caixa(self):
+        cx, self._caixa = self._caixa, None
+        if cx is None:
+            return
+        self.largura += 3
+        linhas = [l[2:] if l.startswith('  ') else l for l in cx['linhas']]
+        while linhas and not ANSI.sub('', linhas[0]).strip():
+            linhas.pop(0)
+        while linhas and not ANSI.sub('', linhas[-1]).strip():
+            linhas.pop()
+        larg = max([vlen(l) for l in linhas] + [len(cx['titulo']) + 3]) + 2
+        borda = lambda s: self.p(s, 'superficie')
+        self.escreve()
+        self.escreve(' ' + self.p('◇', 'verde') + '  ' + self.p(cx['titulo'], 'texto', True) + ' '
+                     + borda('─' * (larg - len(cx['titulo']) - 1) + '╮'), guia=False)
+        for l in [''] + linhas + ['']:
+            self.escreve(' ' + borda('│') + '  ' + l + ' ' * (larg - vlen(l)) + borda('│'), guia=False)
+        self.escreve(' ' + borda('├' + '─' * (larg + 2) + '╯'), guia=False)
+        self._vazia = False
 
     def aba(self, arquivo, descricao=''):
         # a descrição da ferramenta logo abaixo do cabeçalho, discreta
@@ -360,22 +450,24 @@ class Terminal:
             self.escreve('  ' + self.p(corta(descricao, self.largura - 4), 'apagado'))
             self.escreve()
 
-    def prompt(self, pasta, txt):
-        self.escreve('  ' + self.p(f'~/{pasta}', 'apagado') + '  ' + self.p(corta(txt, self.largura - len(pasta) - 6), 'texto'))
+    def prompt(self, pasta, txt, alvo=None):
+        txt = corta(txt, self.largura - len(pasta) - 6)
+        self.escreve('  ' + self.p(f'~/{pasta}', 'apagado') + '  ' + self.link(self.p(txt, 'texto'), alvo))
 
-    def item(self, icone, cor, nome, detalhe='', recuo=2, cor_nome='texto'):
+    def item(self, icone, cor, nome, detalhe='', recuo=2, cor_nome='texto', alvo=None):
         w, d = self.largura, vlen(detalhe)
+        nomeia = lambda n: self.link(self.p(n, cor_nome), alvo)  # o link entra depois do corte
         if d and recuo + 6 + min(len(nome), 16) + d > w:
-            self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + self.p(corta(nome, w - recuo - 2), cor_nome))
+            self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + nomeia(corta(nome, w - recuo - 2)))
             self.escreve(' ' * (recuo + 2) + detalhe)
             return
         n = corta(nome, w - recuo - 5 - d)
         if not d:
-            self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + self.p(n, cor_nome))
+            self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + nomeia(n))
             return
         pontos = max(1, w - recuo - 2 - len(n) - 2 - d)
-        self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + self.p(n, cor_nome) + ' '
-                     + self.p('·' * pontos, 'superficie') + ' ' + detalhe)
+        self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + nomeia(n) + ' '
+                     + self.p('·' * pontos, 'fundo') + ' ' + detalhe)
 
     def partes(self, itens, recuo=4):
         # junta com " · " e quebra a linha entre itens, nunca no meio de um
@@ -416,7 +508,13 @@ class Terminal:
     def nota(self, txt, recuo=2):
         self.escreve(' ' * recuo + self.p(txt, 'apagado'))
 
+    def relatorio(self, arq, rotulo='relatório', recuo=4):
+        """A linha "relatório: caminho", com o caminho clicável onde o terminal deixa."""
+        self.escreve(' ' * recuo + self.p(f'{rotulo}: ', 'apagado')
+                     + self.p(self.caminho(arq, max(12, self.largura - recuo - len(rotulo) - 2)), 'sub'))
+
     def pergunta(self, txt):
+        self.fecha_caixa()
         rotulo = self._com_guia('  ' + self.p(txt, 'sub') + ' ' + self.p('› ', 'verde'))
         try:
             return input(self._adapta(rotulo))
@@ -424,12 +522,34 @@ class Terminal:
             return ''
 
 
+def _aceita_links(env):
+    # mesma régua do pacote supports-hyperlinks (usado pelo npm e pelo Vite)
+    if env.get('FORCE_HYPERLINK'):
+        return env['FORCE_HYPERLINK'] != '0'
+    if 'WT_SESSION' in env:
+        return True
+    if os.name == 'nt' or env.get('CI'):
+        return False
+    prog, ver = env.get('TERM_PROGRAM', ''), env.get('TERM_PROGRAM_VERSION', '')
+    num = tuple(int(x) for x in re.findall(r'\d+', ver)[:2]) or (0,)
+    if prog == 'iTerm.app':
+        return num >= (3, 1)
+    if prog == 'vscode':
+        return num >= (1, 72) or bool(env.get('CURSOR_TRACE_ID'))
+    if prog in ('WezTerm', 'ghostty', 'zed', 'WarpTerminal'):
+        return True
+    vte = env.get('VTE_VERSION', '')
+    if vte.isdigit():
+        return vte != '5000' and int(vte) >= 5000
+    return env.get('TERM') in ('alacritty', 'xterm-kitty')
+
+
 class Progresso:
     QUADROS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
-    def __init__(self, term, total, rotulo):
+    def __init__(self, term, total, rotulo, registro=True):
         # total None = não se sabe quanto falta: mostra só a contagem
-        self.t, self.total, self.rotulo = term, total, rotulo
+        self.t, self.total, self.rotulo, self.registro = term, total, rotulo, registro
         self.n, self.atual, self._i = 0, '', 0
         self._parar = threading.Event()
         self._fio = threading.Thread(target=self._gira, daemon=True)
@@ -437,17 +557,36 @@ class Progresso:
             self.QUADROS = '|/-\\'
         self.cheio = '#' if term.nivel == 'ascii' else '■'
         self.vazio = '■' if term.cor else ('-' if term.nivel == 'ascii' else '·')
+        self.inicio = time.time()
 
     def __enter__(self):
+        self.t.fecha_caixa()
+        self.inicio = time.time()
         if self.t.tty:
+            if self.t.cor:
+                sys.stdout.write('\033[?25l')  # esconde o cursor enquanto gira (ele piscava no meio da linha)
             self._fio.start()
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, tipo, *_):
         self._parar.set()
         if self._fio.is_alive():
             self._fio.join()
         self.t.para_vivo()
+        if self.t.tty and self.t.cor:
+            sys.stdout.write('\033[?25h')
+            sys.stdout.flush()
+        # deixa um registro do passo, como o spinner do Clack: o que foi feito e quanto demorou
+        dur = time.time() - self.inicio
+        if self.registro and (dur >= 1 or tipo is not None) and self.t.guia:
+            conta = (f'{self.n:,}'.replace(',', '.') if self.total is None else f'{self.n}/{self.total}')
+            conta = '' if self.total is None and not self.n else conta + ' · '  # passo sem contagem: só o tempo
+            if tipo is KeyboardInterrupt:
+                icone, fim = self.t.p('■', 'vermelho'), 'interrompido'
+            else:
+                icone, fim = self.t.p('◇', 'verde' if tipo is None else 'vermelho'), _duracao(dur)
+            self.t.escreve(' ' + icone + '  ' + self.t.p(self.rotulo, 'sub') + self.t.p(f'  {conta}{fim}', 'apagado'),
+                           guia=False)
 
     def avanca(self, atual='', n=1):
         self.n += n
@@ -455,25 +594,35 @@ class Progresso:
 
     def _desenho(self):
         t = self.t
-        q = self.QUADROS[self._i % len(self.QUADROS)]
+        q = t.p(self.QUADROS[self._i % len(self.QUADROS)], 'verde')
         self._i += 1
+        dur = time.time() - self.inicio
+        tempo = f' · {_duracao(dur)}' if dur >= 3 else ''
         if self.total is None:
-            conta = f'{self.n:,}'.replace(',', '.')
-            resto = t.largura - 7 - len(self.rotulo) - len(conta)
-            return (f'  {t.p(q, "verde")} {t.p(self.rotulo, "sub")} {t.p(conta, "texto")} '
+            conta = (f'{self.n:,}'.replace(',', '.') if self.n else '') + (tempo[3:] if not self.n else tempo)
+            resto = t.largura - 6 - len(self.rotulo) - len(conta)
+            return (f' {q}  {t.p(self.rotulo, "sub")} {t.p(conta, "texto")} '
                     f'{t.p(corta_esq(self.atual, max(0, resto)), "apagado")}')
         total = max(self.total, 1)
         conta = f'{self.n}/{total}'
-        larg = max(6, min(20, t.largura - len(self.rotulo) - len(conta) - 24))
+        larg = max(6, min(20, t.largura - len(self.rotulo) - len(conta) - 26))
         cheio = int(larg * self.n / total)
         barra = t.p(self.cheio * cheio, 'verde') + t.p(self.vazio * (larg - cheio), 'fundo')
-        resto = t.largura - 8 - len(self.rotulo) - larg - len(conta)
-        return (f'  {t.p(q, "verde")} {t.p(self.rotulo, "sub")} {barra} {t.p(conta, "texto")} '
+        resto = t.largura - 7 - len(self.rotulo) - larg - len(conta) - len(tempo)
+        return (f' {q}  {t.p(self.rotulo, "sub")} {barra} {t.p(conta, "texto")}{t.p(tempo, "apagado")} '
                 f'{t.p(corta(self.atual, resto), "apagado")}')
 
     def _gira(self):
         while not self._parar.wait(0.08):
-            self.t.vivo(self._desenho())
+            self.t.vivo(self._desenho(), guia=False)
+
+
+def _duracao(s):
+    if s < 1:
+        return f'{s * 1000:.0f} ms'
+    if s < 90:
+        return f'{s:.0f} s' if s >= 10 else f'{s:.1f} s'.replace('.', ',')
+    return f'{s // 60:.0f} min {s % 60:02.0f} s'
 
 
 class Relatorio:
@@ -497,8 +646,9 @@ def confirma(t, args, pergunta):
     if not t.interativo:
         t.aviso('Sem terminal para confirmar; use --sim para seguir sem perguntar.')
         return False
+    t.fecha_caixa()
     t.escreve()
-    t.escreve(' ' + t.p('◆', 'amarelo') + ' ' + t.p(pergunta, 'amarelo', True), guia=False)
+    t.escreve(' ' + t.p('◆', 'amarelo') + '  ' + t.p(pergunta, 'amarelo', True), guia=False)
     return t.pergunta('digite SIM para confirmar').strip().lower() == 'sim'
 
 # ███████████████████████████████████████████████████████████████████████████
@@ -1028,19 +1178,22 @@ def ferramenta_segredos(ctx):
             onde = a['caminho'] + (f':{a["linha"]}' if a['linha'] else '')
             if a['lugares'] > 1:
                 onde += f' (+{a["lugares"] - 1})'
-            larg = t.largura - 12
+            # selo de largura fixa: o texto de baixo alinha com o nome, qualquer que seja o nível
+            rec = 4 + 9 + 1
+            larg = t.largura - rec
             onde_atual = 'no código atual' if a['atual'] else 'só no histórico'
             quando = (f'desde {a["desde"]} · ' if a['desde'] else '') + f'id {a["id"]}'
-            t.escreve('    ' + t.p(f'{rot:<7}', cor, True) + ' ' + t.p(corta(a['nome'], larg), 'texto'))
-            t.escreve(' ' * 12 + t.p(corta_esq(onde, larg), 'sub'))
+            selo = t.selo(f'{rot:<7}', cor) if t.cor else f'{"[" + rot + "]":<9}'
+            t.escreve('    ' + selo + ' ' + t.p(corta(a['nome'], larg), 'texto'))
+            t.escreve(' ' * rec + t.p(corta_esq(onde, larg), 'sub'))
             if a['regra'] == 'arquivo':
-                t.escreve(' ' * 12 + t.p(onde_atual, 'apagado'))
+                t.escreve(' ' * rec + t.p(onde_atual, 'apagado'))
             else:
-                t.escreve(' ' * 12 + t.p(corta(mascara(a), larg - len(onde_atual) - 3), 'sub') + t.p(' · ' + onde_atual, 'apagado'))
-            t.escreve(' ' * 12 + t.p(corta(quando, larg), 'apagado'))
+                t.escreve(' ' * rec + t.p(corta(mascara(a), larg - len(onde_atual) - 3), 'sub') + t.p(' · ' + onde_atual, 'apagado'))
+            t.escreve(' ' * rec + t.p(corta(quando, larg), 'apagado'))
             if a['dica']:
                 for l in textwrap.wrap(a['dica'], larg):
-                    t.escreve(' ' * 12 + t.p(l, 'apagado'))
+                    t.escreve(' ' * rec + t.p(l, 'apagado'))
             rel.add(f'  [{rot}] {a["nome"]} — {onde} — {mascara(a)} — {onde_atual} — {quando}'
                     + (f' — {a["dica"]}' if a['dica'] else ''))
         t.escreve()
@@ -1052,7 +1205,7 @@ def ferramenta_segredos(ctx):
         plural = {'critico': 'críticos', 'alto': 'altos', 'medio': 'médios', 'baixo': 'baixos', 'info': 'info'}
         partes = [t.p(f'{total[n]} ' + (NIVEIS[n][0].lower() if total[n] == 1 else plural[n]), NIVEIS[n][1])
                   for n in NIVEIS if total[n]]
-        t.titulo('resumo')
+        t.titulo('resumo', caixa=True)
         t.partes(partes + [t.p(f'{limpos} repositório{"s" if limpos != 1 else ""} limpo{"s" if limpos != 1 else ""}', 'apagado')])
         if total['critico'] or total['alto']:
             t.escreve()
@@ -1062,7 +1215,7 @@ def ferramenta_segredos(ctx):
     else:
         t.ok(f'Nenhum segredo encontrado em {pl(limpos, "repositório")}.')
     rel.add('', f'{sum(total.values())} achados, {limpos} repositórios limpos')
-    t.nota(f'relatório: {caminho_curto(rel.salva(), t.largura - 16)}', 4)
+    t.relatorio(rel.salva())
 
 
 # ═══════════════════════════════ 2. branches ═══════════════════════════════
@@ -1147,7 +1300,7 @@ def ferramenta_branches(ctx):
         t.erro(f'{nome}: {erro}')
     t.escreve()
     sem_branch = sum(1 for v in res.values() if not v)
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     t.partes([t.p(f'{len(apagar)} podem ser apagadas', 'verde'), t.p(f'{manter} ficam', 'sub'),
               t.p(f'{sem_branch} só com a branch principal', 'apagado')])
     if apagar and not ctx.args.teste and confirma(ctx.t, ctx.args, f'Apagar {len(apagar)} branch(es) no GitHub?'):
@@ -1345,7 +1498,7 @@ def ferramenta_demos(ctx):
             cont[ch['nivel']] += 1
             host = re.sub(r'^https?://', '', u).rstrip('/')
             extra = ch['msg'] + (f' · "{ch["titulo"]}"' if ch.get('titulo') else '')
-            t.item(ic, cor, host, t.p(corta(extra, max(12, t.largura - len(host) - 12)), cor if ch['nivel'] != 'ok' else 'apagado'), recuo=4)
+            t.item(ic, cor, host, alvo=u, detalhe=t.p(corta(extra, max(12, t.largura - len(host) - 12)), cor if ch['nivel'] != 'ok' else 'apagado'), recuo=4)
             rel.add(f'  [{ch["nivel"]}] {u} ({origem}) — {extra}')
             if ch['nivel'] == 'ok' and bom is None:
                 bom = u
@@ -1354,7 +1507,7 @@ def ferramenta_demos(ctx):
     for nome, erro in falhas:
         t.erro(f'{nome}: {erro}')
     t.escreve()
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     t.partes([t.p(f'{cont[n]} {rot}', estilo[n][1]) for n, rot in
               (('ok', 'no ar'), ('lento', 'lentos'), ('protegido', 'bloqueados'), ('quebrado', 'fora do ar')) if cont[n]]
              + [t.p(f'{len(sem_demo)} sem demo', 'apagado')])
@@ -1374,7 +1527,7 @@ def ferramenta_demos(ctx):
             ok = sum(1 for r, u in preencher
                      if gh.requisita(f'/repos/{r["full_name"]}', metodo='PATCH', corpo={'homepage': u})[0] == 200)
             t.ok(f'preenchido em {ok}.')
-    t.nota(f'relatório: {caminho_curto(rel.salva(), t.largura - 16)}', 4)
+    t.relatorio(rel.salva())
 
 
 # ═══════════════════════════════ 4. backup ═══════════════════════════════
@@ -1526,7 +1679,7 @@ def ferramenta_backup(ctx):
             t.item('·', 'apagado', o, recuo=4, cor_nome='sub')
     escreve_indice(destino, repos)
     t.escreve()
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     plural = {'novo': 'baixados', 'atualizado': 'atualizados', 'refeito': 'baixados de novo', 'em_dia': 'em dia',
               'sujo': 'pulados', 'vazio': 'vazios'}
     partes = [f'{cont[k]} ' + (estilo[k][2] if cont[k] == 1 else plural[k])
@@ -1859,7 +2012,7 @@ def ferramenta_deps(ctx):
         t.item('✗' if pior <= 1 else '!', cor, rotulo, t.p(p['gerenciador'], 'apagado'))
         if vulns:
             n_pac = sum(cont.values())
-            t.partes([t.p(f'{n_pac} pacote{"s" if n_pac > 1 else ""} com falha:', 'sub')]
+            t.partes([t.p(f'{n_pac} pacote{"s" if n_pac > 1 else ""} com falha', 'sub')]
                      + [t.p(sev_txt(s, cont[s]), SEVERIDADE[s][1]) for s in SEVERIDADE if cont[s]], recuo=6)
             vistos = set()
             for v in sorted(vulns, key=lambda v: SEVERIDADE[v['sev']][2]):
@@ -1886,13 +2039,13 @@ def ferramenta_deps(ctx):
     for x in linhas_resumo:
         total.update(x[4])
     t.escreve()
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     t.partes([t.p(sev_txt(s, total[s]), SEVERIDADE[s][1]) for s in SEVERIDADE if total[s]]
              or [t.p('nenhuma vulnerabilidade', 'verde')])
-    t.partes([t.p(f'{len(lista)} projetos', 'apagado'), t.p(f'{limpos} sem pendências', 'apagado')])
+    t.partes([t.p(pl(len(lista), 'projeto'), 'apagado'), t.p(f'{limpos} sem pendências', 'apagado')])
     t.paragrafo('Nada foi alterado. Para corrigir: npm audit fix (ou pnpm audit --fix); as majors, atualize uma de '
                 'cada vez e rode os testes.', 4, 'apagado')
-    t.nota(f'relatório: {caminho_curto(rel.salva(), t.largura - 16)}', 4)
+    t.relatorio(rel.salva())
 
 
 # ═══════════════════════════════ 6. coautores ═══════════════════════════════
@@ -2018,7 +2171,7 @@ def ferramenta_coautores(ctx):
         t.erro(f'{nome}: {erro}')
     limpos = sum(1 for v in res.values() if v[0] == 'limpo')
     t.escreve()
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     t.partes([t.p(f'{len(prontos)} com coautoria do Claude', 'verde' if prontos else 'texto'),
               t.p(f'{limpos} já limpos', 'apagado')])
     if not prontos:
@@ -2430,7 +2583,7 @@ def ferramenta_faxina(t, args):
     if args.teste:
         t.escreve()
         t.nota('modo teste: nada foi apagado.', 4)
-        t.nota(f'relatório: {caminho_curto(arq, t.largura - 16)}', 4)
+        t.relatorio(arq)
         return 0
     if args.sim:
         escolha = {'1'}
@@ -2483,7 +2636,7 @@ def ferramenta_faxina(t, args):
     if falhas:
         t.paragrafo('O que falhou costuma estar em uso: feche o editor ou o servidor de desenvolvimento e rode de novo.',
                     4, 'apagado')
-    t.titulo('resumo')
+    t.titulo('resumo', caixa=True)
     t.partes([t.p(f'{humano(liberado)} liberados', 'verde'),
               t.p(f'{len(lixo) - len(falhas)} pastas apagadas', 'texto')]
              + ([t.p(f'{len(falhas)} falharam', 'vermelho')] if falhas else []))
@@ -3851,7 +4004,7 @@ def entrega_resumo_ia(t, args, resumo, nome):
     arq_ia.write_text(resumo, encoding='utf-8')
     t.escreve()
     t.titulo('resumo para a IA corrigir')
-    t.nota(f'    {caminho_curto(arq_ia, t.largura - 6)}', 0)
+    t.relatorio(arq_ia, 'arquivo')
     copiar = args.copiar
     if not copiar and t.interativo and not args.sim:
         copiar = t.pergunta('copiar para a área de transferência? s = sim').strip().lower() in ('s', 'sim')
@@ -3870,7 +4023,7 @@ def ferramenta_raiox(t, args):
     if not re.match(r'https?://', url):
         url = ('http://' if re.match(r'(localhost|127\.0\.0\.1)', url) else 'https://') + url
     nav = acha_navegador()
-    t.prompt('raiox', url)
+    t.prompt('raiox', url, alvo=url)
     with Progresso(t, None, 'analisando') as pr:
         pr.atual = 'baixando a página'
         res = analisa_pagina(t, url, args, nav, pr)
@@ -4043,7 +4196,7 @@ def ferramenta_raiox(t, args):
                                                'paginas': extras}, ensure_ascii=False, indent=2), encoding='utf-8')
         t.nota(f'    JSON: {caminho_curto(args.json, t.largura - 12)}', 0)
     t.escreve()
-    t.nota(f'    relatório: {caminho_curto(rel.salva(), t.largura - 17)}', 0)
+    t.relatorio(rel.salva())
     entrega_resumo_ia(t, args, gera_resumo_ia(res, notas, lh, extras, fontes), 'raiox')
     return 0
 
@@ -4444,7 +4597,7 @@ def ferramenta_peso(t, args):
     if not re.match(r'https?://', url):
         url = ('http://' if re.match(r'(localhost|127\.0\.0\.1)', url) else 'https://') + url
     nav = acha_navegador()
-    t.prompt('peso', url)
+    t.prompt('peso', url, alvo=url)
     paginas = []
     with Progresso(t, None, 'medindo') as pr:
         pr.atual = 'baixando a página'
@@ -4653,7 +4806,7 @@ def ferramenta_peso(t, args):
     hist_arq.write_text(json.dumps({'url': med['final'], 'quando': agora_iso(), 'fonte': med['fonte'], 'desktop': bool(args.desktop),
                                     'total': total, 'tipos': {k: v['bytes'] for k, v in tipos.items()}}), encoding='utf-8')
     t.escreve()
-    t.nota(f'    relatório: {caminho_curto(rel.salva(), t.largura - 17)}', 0)
+    t.relatorio(rel.salva())
     entrega_resumo_ia(t, args, gera_resumo_peso(med, total, tipos, n_req, economia, maiores, terceiros), 'peso')
     return 0
 
@@ -5177,7 +5330,7 @@ def ferramenta_atualizar(t, args):
                 linha = f'{corta(nome, max(6, cabe - len(seta) - 2))}  {seta}'
                 t.escreve(' ' * 8 + t.p(linha, 'sub') + (t.p(' (major)', 'amarelo') if major else ''))
             if len(itens) > len(mostrar):
-                t.nota(f'e mais {len(itens) - len(mostrar)} (veja todas com --tudo)', 8)
+                t.paragrafo(f'e mais {len(itens) - len(mostrar)} (veja todas com --tudo)', 8, 'apagado')
             if f['nota']:
                 t.nota(corta(f['nota'], t.largura - 9), 8)
             rel.add(f'{f["nome"]}: {n} atualizações', *[f'  {a} {b} -> {c}' for a, b, c in itens])
@@ -5193,7 +5346,7 @@ def ferramenta_atualizar(t, args):
                     'se algo deixar de funcionar.', 4, 'apagado')
     t.escreve()
     arq_rel = rel.salva()
-    t.nota(f'    relatório: {caminho_curto(arq_rel, t.largura - 17)}', 0)
+    t.relatorio(arq_rel)
 
     pendentes = [f for f in candidatas if f['itens'] or f['itens'] is None]
     com_algo = [f for f in pendentes if f['itens']]
@@ -5264,7 +5417,7 @@ def ferramenta_atualizar(t, args):
             if ultima:
                 t.nota(corta(ultima, t.largura - 9), 8)
     t.escreve()
-    t.nota(f'    log: {caminho_curto(arq_log, t.largura - 11)}', 0)
+    t.relatorio(arq_log, 'log')
     if Path('/var/run/reboot-required').exists():
         t.aviso('o sistema pede para reiniciar o computador.')
     if any(r[1] != 0 for r in resultados):
@@ -5328,7 +5481,7 @@ def roda_ferramenta(ctx, args, mostra_descricao=True):
     for prog in PRECISA.get(cmd, ()):
         if not shutil.which(prog):
             t.erro(f'Essa ferramenta precisa do {prog} instalado.')
-            t.fim('não rodou')
+            t.fim('não rodou', 'erro')
             return 1
     inicio = time.time()
     try:
@@ -5338,12 +5491,12 @@ def roda_ferramenta(ctx, args, mostra_descricao=True):
         else:
             cod = globals()[funcao](t, args)
     except KeyboardInterrupt:
-        t.fim('interrompido')
+        t.fim('interrompido', 'erro')
         return 130
     ctx.estado[cmd] = agora_iso()
     salva_estado(ctx.estado)
     dur = time.time() - inicio
-    t.fim(f'concluído em {dur:.0f} s' if dur < 120 else f'concluído em {dur / 60:.0f} min')
+    t.fim(('concluído em ' if not cod else 'terminou com pendências · ') + _duracao(dur), 'ok' if not cod else 'aviso')
     return cod or 0
 
 
@@ -5415,7 +5568,7 @@ def menu(ctx, parser, args):
     while True:
         t.limpa()
         t.logo()
-        t.cabecalho('início')
+        t.cabecalho('início', f'{len(FERRAMENTAS)} comandos')
         num, por_numero = 0, {}
         for titulo_grupo, grupo, _ in GRUPOS:
             itens = [f for f in FERRAMENTAS if f[4] == grupo]
@@ -5438,7 +5591,7 @@ def menu(ctx, parser, args):
             aviso = ''
         escolha = t.pergunta('número ou nome').strip().lower()
         if escolha in ('', '0', 'q', 'sair'):
-            t.fim('até mais')
+            t.fim('até mais', 'nada')
             return 0
         cmd = por_numero.get(escolha) or (escolha if escolha in nomes else None)
         if not cmd:
@@ -5468,7 +5621,7 @@ def menu(ctx, parser, args):
             # nome com "-" na frente seria lido como opção, e o argparse encerraria o programa inteiro
             sub_args = parser.parse_args([cmd] + ['--'] + extra if extra and grupo == 'repos' else [cmd] + extra)
         except SystemExit:
-            t.fim('não entendi o que foi digitado')
+            t.fim('não entendi o que foi digitado', 'aviso')
             t.espera('Enter para voltar ao menu')
             continue
         for k in ('ascii', 'sem_cor', 'teste', 'sim'):
@@ -5493,7 +5646,7 @@ def main():
             return roda_ferramenta(ctx, args)
         return menu(ctx, parser, args)
     except KeyboardInterrupt:
-        t.fim('interrompido')
+        t.fim('interrompido', 'erro')
         t.escreve(guia=False)
         return 130
     except BrokenPipeError:
