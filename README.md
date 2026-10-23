@@ -8,7 +8,7 @@
 [![Dependências](https://img.shields.io/badge/depend%C3%AAncias-zero-313244?style=for-the-badge)](ferramentas.py)
 [![Terminais](https://img.shields.io/badge/terminais-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-cba6f7?style=for-the-badge)](#funciona-em-qualquer-terminal)
 
-<img src=".github/readme/menu.png" alt="Menu no terminal: logo </> KESSLERU em blocos e as onze ferramentas em dois grupos, GitHub e computador" width="520">
+<img src=".github/readme/menu.png" alt="Menu no terminal: logo </> KESSLERU em blocos e as onze ferramentas em dois grupos (GitHub e computador) e a seção de perfil e configuração" width="520">
 
 </div>
 
@@ -35,7 +35,7 @@ Na primeira vez, a ferramenta procura um login que já exista, nesta ordem: a va
 O token fica no gerenciador de credenciais do sistema ou, se não houver, em `~/.ferramentas/token`, que só o seu usuário lê (a ferramenta pergunta antes). Cada ferramenta que altera o GitHub confere se o token tem a permissão de que precisa, e explica o que falta.
 
 ```bash
-python ferramentas.py login            # quem está logado, de onde veio o login, permissões e consultas restantes
+python ferramentas.py login            # seu perfil, de onde veio o login, permissões e consultas restantes
 python ferramentas.py login --trocar   # cola um token novo
 python ferramentas.py login --sair     # apaga o token guardado pela ferramenta
 ```
@@ -96,6 +96,31 @@ python ferramentas.py login --sair     # apaga o token guardado pela ferramenta
 
 O `raiox` e o `peso` terminam gerando um `.md` com cada problema, onde ele aparece e como corrigir, já adaptado à tecnologia do site (Vite, Next.js, Vercel, Netlify…). Com `--copiar` ele vai direto para a área de transferência: é só colar no Claude Code (ou outra IA) aberto na pasta do projeto.
 
+## Perfil e configuração
+
+O menu tem uma terceira seção, **perfil e configuração**:
+
+- **`login`**: o seu perfil do GitHub (nome, repositórios, seguidores), de onde veio o login, as permissões do token e as consultas restantes. Dali dá para trocar o token ou sair.
+- **`config`**: as preferências da ferramenta, que valem em toda execução, pelo menu ou pela linha de comando.
+
+| Preferência | Chave | O que muda |
+| --- | --- | --- |
+| Usuário do GitHub | `usuario` | Quem é o dono dos repositórios quando não há login |
+| Pasta do backup | `backup` | Onde o `backup` guarda tudo (padrão `~/backup-github`) |
+| Cores | `cores` | `automático` ou `sem cor` (o mesmo que `--sem-cor` sempre) |
+| Símbolos | `simbolos` | `automático` ou `simples` (o mesmo que `--ascii` sempre) |
+| Raio-x e peso medem como | `dispositivo` | `celular` ou `computador` |
+| Faxina: parado depois de | `faxina-dias` | Quantos dias sem mexer para o projeto contar como parado (padrão 30) |
+| Atualizar sempre pula | `atualizar-pular` | Grupos ou gerenciadores que o `atualizar` nunca mexe (ex.: `editores,pip`) |
+
+Ainda na `config`, uma opção limpa relatórios, cache e históricos, mas mantém backups, login e preferências. Sem o menu:
+
+```bash
+python ferramentas.py config                      # mostra tudo
+python ferramentas.py config faxina-dias 60       # muda uma
+python ferramentas.py config dispositivo          # sem valor: volta ao padrão
+```
+
 ## Opções
 
 | Opção | Onde | Efeito |
@@ -142,7 +167,7 @@ ferramentas.py
   núcleo                    utilidades e o terminal (cores, símbolos, progresso)
   PARTE 1 · GitHub          login e API, 1. segredos … 6. coautores
   PARTE 2 · computador      7. faxina, 8. portas, 9. raio-x, 10. peso, 11. atualizar
-  PARTE 3 · menu e entrada  o menu com os dois grupos e os comandos de linha
+  PARTE 3 · menu e entrada  o menu com os três grupos e os comandos de linha
 .github/readme/
   banner.svg                o banner acima
   gerar_banner.py           gera o banner (python .github/readme/gerar_banner.py)
