@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/readme/banner.svg" alt="ferramentas-git — seis ferramentas para todos os seus repositórios do GitHub, em janelas de terminal Catppuccin" width="100%">
+<img src=".github/readme/banner.svg" alt="ferramentas-git: janela de terminal com o logo </> KESSLERU em pixels e a lista das seis ferramentas, no estilo neofetch" width="100%">
 
 **Um só comando para cuidar de todos os seus repositórios do GitHub: caça segredos vazados, faz faxina de branches, confere as demos, faz backup, audita dependências e tira a coautoria do Claude.**
 
