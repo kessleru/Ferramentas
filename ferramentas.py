@@ -46,9 +46,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-DONO = os.environ.get('FERRAMENTAS_DONO') or os.environ.get('FERRAMENTAS_GIT_DONO') or 'kessleru'
-
-
 def _pasta_da_casa():
     escolhida = os.environ.get('FERRAMENTAS_CASA') or os.environ.get('FERRAMENTAS_GIT_CASA')
     if escolhida:
@@ -194,7 +191,7 @@ def corta_visivel(s, n):
         pos = m.end()
     else:
         saida.append(s[pos:][:max(0, n - vistos)])
-    return ''.join(saida) + '\033[0m'
+    return ''.join(saida) + ('\033[0m' if '\033[' in s else '')  # sem cor, nada de código de escape
 
 
 def caminho_curto(p, n=None):
@@ -459,7 +456,7 @@ class Terminal:
         nomeia = lambda n: self.link(self.p(n, cor_nome), alvo)  # o link entra depois do corte
         if d and recuo + 6 + min(len(nome), 16) + d > w:
             self.escreve(' ' * recuo + self.p(icone, cor) + ' ' + nomeia(corta(nome, w - recuo - 2)))
-            self.escreve(' ' * (recuo + 2) + detalhe)
+            self.escreve(' ' * (recuo + 2) + corta_visivel(detalhe, w - recuo - 2))
             return
         n = corta(nome, w - recuo - 5 - d)
         if not d:
@@ -666,33 +663,66 @@ class ErroAPI(Exception):
         self.status = status
 
 
+URL_NOVO_TOKEN = 'https://github.com/settings/tokens/new?scopes=repo,workflow&description=ferramentas'
+ESCOPOS_ESCRITA = {'repo', 'workflow'}
+
+
+def _arquivo_token():
+    return CASA / 'token'
+
+
 def obter_token():
+    """Procura um login já feito, do mais explícito para o mais implícito. Devolve (token, de onde veio)."""
     for var in ('GH_TOKEN', 'GITHUB_TOKEN'):
         if os.environ.get(var):
-            return os.environ[var].strip()
+            return os.environ[var].strip(), f'variável {var}'
     if shutil.which('gh'):
         r = roda(['gh', 'auth', 'token'], tempo=20)
         if r.returncode == 0 and r.stdout.strip():
-            return texto(r.stdout).strip()
+            return texto(r.stdout).strip(), 'GitHub CLI (gh)'
+    try:
+        guardado = _arquivo_token().read_text(encoding='utf-8').strip()
+        if guardado:
+            return guardado, caminho_curto(_arquivo_token())
+    except OSError:
+        pass
+    # o gerenciador de credenciais do git (o do Windows e o do macOS já vêm ligados)
     r = roda(['git', 'credential', 'fill'], entrada=b'protocol=https\nhost=github.com\n\n',
-             env=dict(os.environ, GIT_TERMINAL_PROMPT='0'), tempo=180)
+             env=dict(os.environ, GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never'), tempo=60)
     for linha in texto(r.stdout).splitlines():
         if linha.startswith('password='):
-            return linha[9:].strip()
-    return None
+            return linha[9:].strip(), 'gerenciador de credenciais do git'
+    return None, None
+
+
+def traduz_erro_github(status, msg):
+    baixo = (msg or '').lower()
+    if status == 401:
+        return 'o GitHub recusou o login (token vencido ou revogado); troque com: python ferramentas.py login --trocar'
+    if status in (403, 429) and 'rate limit' in baixo:
+        return 'limite de consultas do GitHub atingido (sem login são só 60 por hora); faça login ou espere um pouco'
+    if status == 403 and 'saml' in baixo:
+        return 'a organização exige liberar o token no SSO: em github.com/settings/tokens, clique em "Configure SSO"'
+    if status == 403 and ('resource not accessible' in baixo or 'must have admin' in baixo):
+        return 'o token não tem permissão para isso (crie um com "repo" e "workflow")'
+    if status == 404:
+        return 'não encontrado (ou o login atual não tem acesso)'
+    return msg
 
 
 class GitHub:
     API = 'https://api.github.com'
 
-    def __init__(self, term, sem_login=False):
-        self.t, self.token, self.login = term, None, None
+    def __init__(self, term, sem_login=False, estado=None):
+        self.t, self.token, self.login, self.origem, self.escopos = term, None, None, None, None
+        self.estado = estado if estado is not None else {}
         if not shutil.which('curl'):
             raise SystemExit('ERRO: preciso do curl instalado.')
         if not sem_login:
             self._entrar()
+        self.dono = self._descobre_dono()
 
-    def requisita(self, url, metodo='GET', corpo=None, aceita=None, tempo=40):
+    def requisita(self, url, metodo='GET', corpo=None, aceita=None, tempo=40, cabecalhos=None):
         if url.startswith('/'):
             url = self.API + url
         do_github = url.startswith(self.API)
@@ -707,12 +737,16 @@ class GitHub:
             cfg.append(f'request = "{metodo}"')
         # -L: repositório renomeado responde 301 apontando para o endereço novo
         args = ['curl', '-sS', '-L', '-K', '-', '--max-time', str(tempo), '-w', '\n%{http_code}']
-        arq_corpo = None
+        arq_corpo = arq_cab = None
         if corpo is not None:
             CASA.mkdir(parents=True, exist_ok=True)
             arq_corpo = CASA / f'.corpo-{os.getpid()}-{threading.get_ident()}.json'
             arq_corpo.write_text(json.dumps(corpo), encoding='utf-8')
             args += ['-H', 'Content-Type: application/json', '--data-binary', f'@{arq_corpo}']
+        if cabecalhos is not None:
+            CASA.mkdir(parents=True, exist_ok=True)
+            arq_cab = CASA / f'.cab-{os.getpid()}-{threading.get_ident()}.txt'
+            args += ['-D', str(arq_cab)]
         try:
             status, dados = 0, b''
             for tentativa in range(3):
@@ -723,13 +757,19 @@ class GitHub:
                     time.sleep(1.5 * (tentativa + 1))
                     continue
                 break
+            if arq_cab is not None and arq_cab.exists():
+                for l in arq_cab.read_text('utf-8', 'replace').splitlines():
+                    k, _, v = l.partition(':')
+                    if v:
+                        cabecalhos[k.strip().lower()] = v.strip()
             return status, dados
         finally:
-            if arq_corpo:
-                try:
-                    arq_corpo.unlink()
-                except OSError:
-                    pass
+            for arq in (arq_corpo, arq_cab):
+                if arq:
+                    try:
+                        arq.unlink()
+                    except OSError:
+                        pass
 
     def json(self, url, **kw):
         status, dados = self.requisita(url, **kw)
@@ -738,7 +778,7 @@ class GitHub:
                 msg = json.loads(dados).get('message', '')
             except (ValueError, AttributeError):
                 msg = texto(dados)[:160]
-            raise ErroAPI(status, msg or f'HTTP {status}')
+            raise ErroAPI(status, traduz_erro_github(status, msg) or f'HTTP {status}')
         return json.loads(dados) if dados.strip() else None
 
     def paginas(self, url):
@@ -760,40 +800,125 @@ class GitHub:
 
     def _entrar(self):
         t = self.t
-        self.token = obter_token()
-        if self.token and not self._valida():
-            self.token = None
-        if not self.token and self.t.interativo:
-            t.aviso('Não achei seu login do GitHub.')
-            t.paragrafo('Crie um token em github.com/settings/tokens (tipo "classic", marcando "repo" e '
-                        '"workflow") e cole aqui. Ele não aparece na tela.')
-            try:
-                digitado = getpass.getpass('  token: ').strip()
-            except (EOFError, KeyboardInterrupt):
-                digitado = ''
-            if digitado:
-                self.token = digitado
-                if self._valida():
-                    self._guarda(digitado)
-                else:
-                    t.erro('Esse token não foi aceito pelo GitHub.')
-                    self.token = None
+        self.token, self.origem = obter_token()
         if self.token:
-            t.ok(f'conectado como {t.p(self.login, "verde")}')
+            erro = self._valida()
+            if erro:
+                t.aviso(f'O login de {self.origem} não funcionou: {erro}')
+                self.token = self.origem = None
+        if not self.token and t.interativo:
+            self.pede_token()
+        if self.token:
+            t.ok(f'conectado como {t.p(self.login, "verde")}' + t.p(f'  via {self.origem}', 'apagado'))
         else:
-            t.aviso(f'Sem login: só os repositórios públicos de {DONO}, e nada pode ser alterado.')
+            t.aviso('Sem login: só repositórios públicos, nada pode ser alterado, e o GitHub deixa 60 consultas por hora.')
+
+    def pede_token(self):
+        """Pede um token, com o formulário do GitHub já preenchido. Devolve True se entrou."""
+        t = self.t
+        t.escreve()
+        t.titulo('login no GitHub')
+        t.paragrafo('Para ver os repositórios privados e poder alterar alguma coisa, a ferramenta precisa de um '
+                    'token. O formulário abre já marcado com "repo" e "workflow"; escolha a validade e clique em '
+                    '"Generate token".', 2, 'sub')
+        # com link clicável, um texto curto basta; sem, o endereço inteiro precisa aparecer para copiar
+        rotulo = 'github.com/settings/tokens/new  (repo + workflow)' if t.links else URL_NOVO_TOKEN
+        t.escreve('  ' + t.p(t.link(rotulo, URL_NOVO_TOKEN), 'azul'))
+        gcm = roda(['git', 'credential-manager', '--version'], tempo=15).returncode == 0
+        t.paragrafo('a = abrir no navegador' + (' · g = entrar pelo navegador (Git Credential Manager)' if gcm else '')
+                    + ' · Enter = continuar sem login · ou cole o token', 2, 'apagado')
+        for _ in range(3):
+            try:
+                resp = getpass.getpass(t._adapta(t._com_guia('  ' + t.p('token', 'sub') + ' ' + t.p('› ', 'verde')))).strip()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            if not resp:
+                return False
+            if resp.lower() in ('a', 'abrir'):
+                import webbrowser
+                if not webbrowser.open(URL_NOVO_TOKEN):
+                    t.aviso('não consegui abrir o navegador; copie o endereço acima.')
+                continue
+            if resp.lower() == 'g' and gcm:
+                # o gerenciador do Git abre o login do GitHub no navegador e devolve um token (repo + workflow)
+                t.nota('abrindo o login do GitHub no navegador…', 2)
+                r = roda(['git', 'credential', 'fill'], entrada=b'protocol=https\nhost=github.com\n\n',
+                         env=dict(os.environ, GCM_INTERACTIVE='always'), tempo=300)
+                resp = next((l[9:].strip() for l in texto(r.stdout).splitlines() if l.startswith('password=')), '')
+                if not resp:
+                    t.aviso('o login pelo navegador não terminou.')
+                    continue
+            self.token = resp
+            erro = self._valida()
+            if erro:
+                t.erro(f'Esse token não foi aceito: {erro}')
+                self.token = None
+                continue
+            self.origem = 'token colado agora'
+            self._guarda(resp)
+            return True
+        return False
 
     def _valida(self):
+        cab = {}
+        st, dados = self.requisita('/user', cabecalhos=cab)
+        if st != 200:
+            try:
+                msg = json.loads(dados).get('message', '')
+            except (ValueError, AttributeError):
+                msg = ''
+            return traduz_erro_github(st, msg) or f'HTTP {st}'
         try:
-            self.login = self.json('/user')['login']
-            return True
-        except (ErroAPI, KeyError, TypeError):
-            return False
+            self.login = json.loads(dados)['login']
+        except (ValueError, KeyError, TypeError):
+            return 'resposta inesperada do GitHub'
+        # token "classic" diz as permissões no cabeçalho; o "fine-grained" não diz (escopos = None)
+        escopos = {e.strip() for e in cab.get('x-oauth-scopes', '').split(',') if e.strip()}
+        self.escopos = escopos or None  # vazio ou ausente: token sem lista de escopos (fine-grained, app)
+        return None
+
+    def falta_permissao(self, precisa=ESCOPOS_ESCRITA):
+        """O que falta no token para alterar o GitHub (vazio = tudo certo, ou o token não diz)."""
+        if self.escopos is None:
+            return set()
+        tem = set(self.escopos) | ({'repo'} if 'public_repo' in self.escopos else set())
+        return set(precisa) - tem
 
     def _guarda(self, token):
+        t = self.t
         if texto(roda(['git', 'config', 'credential.helper']).stdout).strip():
-            roda(['git', 'credential', 'approve'],
-                 entrada=f'protocol=https\nhost=github.com\nusername={self.login or DONO}\npassword={token}\n\n'.encode())
+            r = roda(['git', 'credential', 'approve'],
+                     entrada=f'protocol=https\nhost=github.com\nusername={self.login}\npassword={token}\n\n'.encode())
+            if r.returncode == 0:
+                t.ok('token guardado no gerenciador de credenciais do git: não vai ser pedido de novo.')
+                return
+        if not t.interativo:
+            return
+        t.paragrafo(f'Guardar o token neste computador? Ele fica em {caminho_curto(_arquivo_token())}, que só o seu '
+                    'usuário consegue ler. s = sim, Enter = não (vai ser pedido de novo na próxima vez)', 2, 'apagado')
+        if t.pergunta('guardar').strip().lower() in ('s', 'sim'):
+            try:
+                CASA.mkdir(parents=True, exist_ok=True)
+                arq = _arquivo_token()
+                # cria já com permissão só do dono, antes de escrever o segredo
+                fd = os.open(str(arq), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(token + '\n')
+                t.ok(f'guardado em {caminho_curto(arq)}. Para apagar: python ferramentas.py login --sair')
+            except OSError as e:
+                t.erro(f'não consegui guardar: {e}')
+
+    def _descobre_dono(self):
+        if self.login:
+            return self.login
+        dono = os.environ.get('FERRAMENTAS_DONO') or os.environ.get('FERRAMENTAS_GIT_DONO') or self.estado.get('usuario_github')
+        if not dono and self.t.interativo:
+            self.t.paragrafo('Qual é o seu usuário do GitHub? (é o nome que aparece em github.com/usuario)', 2, 'apagado')
+            dono = self.t.pergunta('usuário').strip().lstrip('@')
+            if dono:
+                self.estado['usuario_github'] = dono
+                salva_estado(self.estado)
+        return dono or ''
 
     def env_git(self):
         env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
@@ -808,7 +933,9 @@ class GitHub:
     def repos(self, nomes=None, forks=False, arquivados=True):
         if nomes:
             def um(n):
-                full = n if '/' in n else f'{DONO}/{n}'
+                if '/' not in n and not self.dono:
+                    return {'_erro': f'{n}: diga o dono junto (dono/{n}), ou faça login'}
+                full = n if '/' in n else f'{self.dono}/{n}'
                 try:
                     r = self.json(f'/repos/{full}')
                 except ErroAPI as e:
@@ -825,8 +952,10 @@ class GitHub:
                     lista.append(r)
         elif self.token:
             lista = self.paginas('/user/repos?affiliation=owner')
+        elif self.dono:
+            lista = self.paginas(f'/users/{self.dono}/repos?type=owner')
         else:
-            lista = self.paginas(f'/users/{DONO}/repos?type=owner')
+            raise ErroAPI(0, 'sem login e sem usuário: diga os repositórios (dono/nome) ou defina FERRAMENTAS_DONO')
         lista = [r for r in lista if (forks or not r.get('fork')) and (arquivados or not r.get('archived'))]
         return sorted(lista, key=lambda r: r['name'].lower())
 
@@ -840,19 +969,25 @@ class Ctx:
     @property
     def gh(self):
         if self._gh is None:
-            self._gh = GitHub(self.t, sem_login=self.args.sem_login)
+            self._gh = GitHub(self.t, sem_login=getattr(self.args, 'sem_login', False), estado=self.estado)
         return self._gh
 
 
 def escolhe_repos(ctx, arquivados=True, precisa_login=False):
     t, gh = ctx.t, ctx.gh
-    if precisa_login and not gh.token and not ctx.args.sem_login:
-        t.erro('Essa ferramenta altera o GitHub e precisa de login.')
-        return []
+    if precisa_login:
+        if not gh.token:
+            t.erro('Essa ferramenta altera o GitHub e precisa de login (rode de novo e cole um token, ou use --teste).')
+            return []
+        falta = gh.falta_permissao(precisa_login if isinstance(precisa_login, (set, frozenset)) else ESCOPOS_ESCRITA)
+        if falta:
+            t.erro(f'O token não tem a permissão {", ".join(sorted(falta))}, que essa ferramenta usa para alterar o GitHub.')
+            t.paragrafo(f'Crie outro em {URL_NOVO_TOKEN} e troque com: python ferramentas.py login --trocar', 4, 'apagado')
+            return []
     try:
         lista = gh.repos(ctx.args.repos or None, forks=ctx.args.forks, arquivados=arquivados)
     except ErroAPI as e:
-        t.erro(f'O GitHub recusou a lista de repositórios: {e}')
+        t.erro(f'Não consegui a lista de repositórios: {e}')
         return []
     pub = sum(1 for r in lista if not r.get('private'))
     priv = len(lista) - pub
@@ -862,6 +997,51 @@ def escolhe_repos(ctx, arquivados=True, precisa_login=False):
         texto = f'{total} · {priv} privado{"s" if priv != 1 else ""}'
     t.prompt('repos', texto)
     return lista
+
+
+def ferramenta_login(ctx):
+    t, args = ctx.t, ctx.args
+    if args.sair:
+        apagou = []
+        if _arquivo_token().exists():
+            _arquivo_token().unlink()
+            apagou.append(caminho_curto(_arquivo_token()))
+        r = roda(['git', 'credential', 'reject'], entrada=b'protocol=https\nhost=github.com\n\n')
+        if r.returncode == 0 and texto(roda(['git', 'config', 'credential.helper']).stdout).strip():
+            apagou.append('gerenciador de credenciais do git')
+        t.ok('login apagado de: ' + ', '.join(apagou) if apagou else 'não havia login guardado pela ferramenta.')
+        if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
+            t.aviso('A variável GH_TOKEN/GITHUB_TOKEN continua definida no seu terminal.')
+        return 0
+    if args.trocar:
+        if _arquivo_token().exists():
+            _arquivo_token().unlink()
+        gh = GitHub(t, sem_login=True, estado=ctx.estado)
+        if not gh.pede_token():
+            t.aviso('nada mudou.')
+            return 1
+        ctx._gh = gh
+    gh = ctx.gh
+    if not gh.token:
+        return 1
+    t.escreve()
+    t.titulo('login atual', caixa=True)
+    t.item('●', 'verde', 'usuário', t.p(gh.login, 'texto'), recuo=2)
+    t.item('●', 'verde', 'vem de', t.p(gh.origem or '?', 'sub'), recuo=2)
+    if gh.escopos is None:
+        t.item('●', 'azul', 'permissões', t.p('token fine-grained (veja no GitHub)', 'sub'), recuo=2)
+    else:
+        falta = gh.falta_permissao()
+        t.item('●' if not falta else '!', 'verde' if not falta else 'amarelo', 'permissões',
+               t.p(', '.join(sorted(gh.escopos)) or 'nenhuma', 'sub'), recuo=2)
+        if falta:
+            t.paragrafo(f'falta {", ".join(sorted(falta))}: branches, coautores e o preenchimento do campo "site" não vão funcionar',
+                        4, 'amarelo')
+    cab = {}
+    gh.requisita('/rate_limit', cabecalhos=cab)
+    if cab.get('x-ratelimit-remaining'):
+        t.item('●', 'verde', 'consultas restantes', t.p(f'{cab["x-ratelimit-remaining"]} de {cab.get("x-ratelimit-limit", "?")} nesta hora', 'sub'), recuo=2)
+    return 0
 
 
 def em_paralelo(t, itens, funcao, rotulo, nome=lambda x: x['name'], fios=6):
@@ -1277,7 +1457,7 @@ def ferramenta_branches(ctx):
     t, gh = ctx.t, ctx.gh
     if ctx.args.restaurar:
         return restaura_branches(ctx, Path(ctx.args.restaurar))
-    repos = escolhe_repos(ctx, arquivados=False, precisa_login=not ctx.args.teste)
+    repos = escolhe_repos(ctx, arquivados=False, precisa_login={'repo'} if not ctx.args.teste else False)
     if not repos:
         return
     res, falhas = em_paralelo(t, repos, lambda r: analisa_branches(gh, r), 'analisando', fios=6)
@@ -1328,7 +1508,9 @@ def ferramenta_branches(ctx):
         arq.write_text(json.dumps(feitas, indent=2), encoding='utf-8')
         t.ok(f'{len(feitas)} apagadas.')
         t.nota(f'para desfazer: python {Path(sys.argv[0]).name} branches --restaurar "{caminho_curto(arq)}"', 4)
-    sem_auto = [r for r in repos if r.get('delete_branch_on_merge') is False]
+    # mudar a configuração do repositório exige ser admin dele e um token com "repo"
+    sem_auto = [r for r in repos if r.get('delete_branch_on_merge') is False and (r.get('permissions') or {}).get('admin')
+                and not gh.falta_permissao({'repo'})]
     if sem_auto and not ctx.args.teste:
         t.escreve()
         t.paragrafo(f'{len(sem_auto)} repositórios não apagam a branch sozinhos depois do merge do PR. '
@@ -1359,7 +1541,7 @@ def restaura_branches(ctx, arq):
 # ═══════════════════════════════ 3. demos ═══════════════════════════════
 
 HOSTS_DEMO = ('vercel.app', 'netlify.app', 'github.io', 'pages.dev', 'onrender.com', 'railway.app', 'fly.dev',
-              'herokuapp.com', 'surge.sh', 'firebaseapp.com', 'web.app', 'glitch.me', 'kessleru.com.br')
+              'herokuapp.com', 'surge.sh', 'firebaseapp.com', 'web.app', 'glitch.me')
 # palavra forte já basta; palavra fraca ("site", "acesse") só conta se o endereço for seu ou de deploy,
 # senão "site do MDN" e "guia de acessibilidade" viravam a demo do projeto
 PALAVRAS_DEMO = re.compile(r'(?i)\b(demo|demonstra[cç][aã]o|ao vivo|live|preview|deploy|no ar)\b')
@@ -1382,7 +1564,7 @@ ERROS_CURL = {6: 'o domínio não existe', 7: 'conexão recusada', 28: 'demorou 
 CFG_DEPLOY = {'vercel.json', 'netlify.toml', 'firebase.json', 'render.yaml', 'fly.toml', 'CNAME'}
 
 
-def links_de_demo(md, repo=''):
+def links_de_demo(md, repo='', dono=''):
     achados = []
     for alt, url in re.findall(r'\[!\[([^\]]*)\]\([^)]*\)\]\((https?://[^)\s]+)\)', md):
         achados.append((alt, url))
@@ -1400,7 +1582,7 @@ def links_de_demo(md, repo=''):
             continue
         # host de deploy só conta sozinho se for seu (seu usuário ou o nome do repositório no endereço);
         # link de crédito para o github.io de outra pessoa não é a sua demo
-        meu = DONO.lower() in host or (repo and re.sub(r'[^a-z0-9]', '', repo.lower())[:10] in re.sub(r'[^a-z0-9]', '', host))
+        meu = (dono and dono.lower() in host) or (repo and re.sub(r'[^a-z0-9]', '', repo.lower())[:10] in re.sub(r'[^a-z0-9]', '', host))
         de_deploy = host.endswith(HOSTS_DEMO)
         if PALAVRAS_DEMO.search(txt) or ((meu or de_deploy) and PALAVRAS_FRACAS.search(txt)) or (de_deploy and meu):
             saida.append(url)
@@ -1416,7 +1598,7 @@ def coleta_demos(gh, r):
     if md is None:
         st, dados = gh.requisita(f'/repos/{full}/readme', aceita='application/vnd.github.raw')
         md = dados if st == 200 else b''
-    for u in links_de_demo(texto(md), r['name']):
+    for u in links_de_demo(texto(md), r['name'], r.get('owner', {}).get('login', '')):
         urls.append((u, 'README'))
     if r.get('has_pages'):
         try:
@@ -1517,7 +1699,10 @@ def ferramenta_demos(ctx):
         for nome, cfg in so_cfg:
             t.item('?', 'amarelo', nome, t.p(', '.join(cfg), 'apagado'), recuo=4)
             rel.add(f'{nome}: tem {", ".join(cfg)} mas nenhum link de demo')
-    if preencher and gh.token and not ctx.args.teste:
+    if preencher and gh.token and not ctx.args.teste and gh.falta_permissao({'repo'}):
+        t.paragrafo(f'{pl(len(preencher), "repositório")} com demo no ar e o campo "site" vazio; para preencher sozinho, '
+                    'o token precisa da permissão "repo".', 4, 'apagado')
+    elif preencher and gh.token and not ctx.args.teste:
         t.escreve()
         t.paragrafo(f'{len(preencher)} repositórios têm demo no ar mas o campo "site" do GitHub está vazio '
                     '(é o link que aparece no topo da página do repositório).', 4, 'sub')
@@ -1693,7 +1878,7 @@ def ferramenta_backup(ctx):
 RE_VER = re.compile(r'^\s*[v=]?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:-([0-9A-Za-z.-]+))?')
 SEVERIDADE = {'critical': ('crítica', 'vermelho', 0), 'high': ('alta', 'pessego', 1),
               'moderate': ('moderada', 'amarelo', 2), 'low': ('baixa', 'azul', 3), 'info': ('info', 'apagado', 4)}
-LOCKFILES = ('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock')
+LOCKFILES = ('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock')
 
 
 def sev_txt(sev, n):
@@ -1833,6 +2018,8 @@ def le_yarn_lock(txt, diretas):
                 for sp in specs:
                     i = sp.rindex('@') if '@' in sp[1:] else len(sp)
                     nome, faixa = sp[:i], sp[i + 1:].replace('npm:', '')
+                    if nome.startswith('__') or faixa.startswith(('workspace:', 'link:', 'portal:', 'patch:')):
+                        continue
                     todos[nome].add(m.group(1))
                     por_faixa[(nome, faixa)] = m.group(1)
             specs = None
@@ -1869,6 +2056,158 @@ def acha_projetos(caminhos):
     return projetos
 
 
+# ---- Python: poetry.lock, uv.lock, Pipfile.lock e requirements*.txt, auditados pela base OSV ----
+LOCKS_PY = ('poetry.lock', 'uv.lock', 'Pipfile.lock')
+GERENCIADOR_PY = {'poetry.lock': 'poetry', 'uv.lock': 'uv', 'Pipfile.lock': 'pipenv'}
+
+
+def nome_py(n):
+    # PEP 503: "Flask_SQLAlchemy" e "flask-sqlalchemy" são o mesmo pacote
+    return re.sub(r'[-_.]+', '-', n.strip().lower())
+
+
+def le_lock_toml(txt):
+    """poetry.lock e uv.lock: um bloco [[package]] por pacote, com name e version."""
+    pacotes = {}
+    for bloco in re.split(r'^\[\[package\]\]\s*$', txt, flags=re.M)[1:]:
+        cabeca = bloco.split('\n[', 1)[0]
+        n = re.search(r'^name\s*=\s*"([^"]+)"', cabeca, re.M)
+        v = re.search(r'^version\s*=\s*"([^"]+)"', cabeca, re.M)
+        # no uv.lock o próprio projeto aparece como pacote "editable"/"virtual": não é dependência
+        if n and v and not re.search(r'^source\s*=\s*\{[^}]*\b(editable|virtual)\b', cabeca, re.M):
+            pacotes[nome_py(n.group(1))] = v.group(1)
+    return pacotes
+
+
+def le_pipfile_lock(txt):
+    d = json.loads(txt)
+    return {nome_py(n): (i.get('version') or '').lstrip('=') for sec in ('default', 'develop')
+            for n, i in (d.get(sec) or {}).items() if isinstance(i, dict) and (i.get('version') or '').startswith('==')}
+
+
+def le_requirements(txt):
+    fixas, nomes = {}, []
+    for l in txt.splitlines():
+        l = l.split('#', 1)[0].split(';', 1)[0].strip()
+        if not l or l.startswith(('-', 'git+', 'http:', 'https:', 'file:', '.', '/')):
+            continue
+        m = re.match(r'([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)', l)
+        if not m:
+            continue
+        n = nome_py(m.group(1))
+        nomes.append(n)
+        v = re.match(r'===?\s*([0-9][^\s,]*)\s*$', m.group(3))
+        if v:
+            fixas[n] = v.group(1)
+    return fixas, nomes
+
+
+def nomes_pyproject(txt):
+    nomes = []
+    m = re.search(r'^\s*dependencies\s*=\s*\[(.*?)\]', txt, re.M | re.S)
+    if m:
+        nomes += [nome_py(x) for x in re.findall(r'["\']\s*([A-Za-z0-9][A-Za-z0-9._-]*)', m.group(1))]
+    for sec in re.findall(r'^\[tool\.poetry\.(?:group\.\w+\.)?(?:dev-)?dependencies\]\s*$(.*?)(?=^\[|\Z)', txt, re.M | re.S):
+        nomes += [nome_py(x) for x in re.findall(r'^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=', sec, re.M) if x.lower() != 'python']
+    return nomes
+
+
+def projetos_python(caminhos):
+    pastas = defaultdict(list)
+    for c in caminhos:
+        pasta, _, base = c.rpartition('/')
+        if any(p in c.split('/') for p in ('node_modules', 'venv', '.venv', 'site-packages')):
+            continue
+        if base in LOCKS_PY or base in ('pyproject.toml', 'Pipfile') or re.match(r'requirements[\w.-]*\.txt$', base):
+            pastas[pasta].append(c)
+    return pastas
+
+
+def analisa_python(gh, full, ramo, pasta, arquivos):
+    bases = {a.rpartition('/')[2]: a for a in arquivos}
+    lock = next((bases[b] for b in LOCKS_PY if b in bases), None)
+    todos, nomes, fixas = {}, [], {}
+    for b, a in bases.items():
+        txt = texto(gh.bruto(full, a, ramo) or b'')
+        if b == 'pyproject.toml':
+            nomes += nomes_pyproject(txt)
+        elif b.startswith('requirements'):
+            f, n = le_requirements(txt)
+            fixas.update(f)
+            nomes += n
+        elif b == 'Pipfile':
+            nomes += [nome_py(x) for x in re.findall(r'^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=', txt, re.M)
+                      if x.lower() not in ('url', 'verify_ssl', 'name', 'python_version')]
+        elif a == lock:
+            try:
+                todos = le_pipfile_lock(txt) if b == 'Pipfile.lock' else le_lock_toml(txt)
+            except ValueError:
+                todos = {}
+    if not todos:
+        todos = dict(fixas)  # sem lockfile, só dá para auditar o que tem versão fixa (==)
+    nomes = list(dict.fromkeys(nomes)) or list(todos)
+    diretas = {n: todos[n] for n in nomes if n in todos}
+    if not todos and not nomes:
+        return None
+    return {'pasta': pasta or '.', 'eco': 'PyPI', 'gerenciador': GERENCIADOR_PY.get(lock.rpartition('/')[2], 'pip') if lock else 'pip',
+            'diretas': diretas, 'todos': {n: [v] for n, v in todos.items()},
+            'sem_versao': [n for n in nomes if n not in todos]}
+
+
+def audita_osv(gh, todos, eco):
+    pares = [(n, v) for n, vs in todos.items() for v in vs]
+    achados_brutos = []
+    for i in range(0, len(pares), 500):
+        lote = pares[i:i + 500]
+        st, dados = gh.requisita('https://api.osv.dev/v1/querybatch', metodo='POST', tempo=60,
+                                 corpo={'queries': [{'package': {'name': n, 'ecosystem': eco}, 'version': v} for n, v in lote]})
+        if st != 200:
+            raise RuntimeError(f'a base de vulnerabilidades OSV respondeu {st}')
+        for (n, v), r in zip(lote, json.loads(dados).get('results', [])):
+            achados_brutos += [(n, v, x['id']) for x in (r or {}).get('vulns') or []]
+    if not achados_brutos:
+        return []
+
+    def detalhe(i):
+        st, d = gh.requisita(f'https://api.osv.dev/v1/vulns/{quote(i)}', tempo=30)
+        try:
+            return i, json.loads(d) if st == 200 else {}
+        except ValueError:
+            return i, {}
+
+    with ThreadPoolExecutor(8) as ex:
+        detalhes = dict(ex.map(detalhe, sorted({x[2] for x in achados_brutos})))
+    achados = []
+    por_pacote = defaultdict(list)
+    for n, v, i in achados_brutos:
+        por_pacote[(n, v)].append(i)
+    for (n, v), ids in por_pacote.items():
+        vistos = set()
+        # o mesmo problema vem com dois nomes (PYSEC-… e GHSA-…): fica um, de preferência o GHSA, que tem gravidade
+        for i in sorted(ids, key=lambda x: (not x.startswith('GHSA'), x)):
+            if i in vistos:
+                continue
+            d = detalhes.get(i, {})
+            vistos |= {i, *d.get('aliases', [])}
+            sev = ((d.get('database_specific') or {}).get('severity') or 'moderate').lower()
+            titulo = d.get('summary') or (d.get('details') or '').strip().split('\n')[0]
+            achados.append({'pacote': n, 'versoes': [v], 'sev': sev if sev in SEVERIDADE else 'moderate',
+                            'titulo': corta(titulo or i, 110), 'url': f'https://osv.dev/vulnerability/{i}', 'id': i})
+    return achados
+
+
+def le_bun_lock(txt):
+    """bun.lock (texto, Bun 1.2+): em "packages", cada chave aponta para ["nome@versão", ...]."""
+    todos, topo = defaultdict(set), {}
+    for chave, nome, versao in re.findall(r'"([^"]+)":\s*\[\s*"((?:@[^@"/]+/)?[^@"]+)@([^"]+)"', txt):
+        if versao.startswith(('workspace:', 'file:', 'link:')):
+            continue
+        todos[nome].add(versao)
+        if chave == nome:
+            topo[nome] = versao
+    return todos, topo
+
+
 def analisa_deps_repo(gh, r):
     full, ramo = r['full_name'], r.get('default_branch') or 'main'
     try:
@@ -1903,6 +2242,9 @@ def analisa_deps_repo(gh, r):
                 elif base == 'pnpm-lock.yaml':
                     todos, topo = le_pnpm_lock(bruto)
                     gerenciador = 'pnpm'
+                elif base == 'bun.lock':
+                    todos, topo = le_bun_lock(bruto)
+                    gerenciador = 'bun'
                 else:
                     todos, topo = le_yarn_lock(bruto, diretas)
                     gerenciador = 'yarn'
@@ -1918,13 +2260,19 @@ def analisa_deps_repo(gh, r):
                     todos[n].add(v)
             if v:
                 versoes_diretas[n] = v
-        saida.append({'pasta': pasta or '.', 'gerenciador': gerenciador, 'diretas': versoes_diretas,
+        saida.append({'pasta': pasta or '.', 'eco': 'npm', 'gerenciador': gerenciador, 'diretas': versoes_diretas,
                       'todos': {k: sorted(v) for k, v in todos.items()}})
+    for pasta, arquivos in sorted(projetos_python(caminhos).items()):
+        proj = analisa_python(gh, full, ramo, pasta, arquivos)
+        if proj:
+            saida.append(proj)
     return saida
 
 
-def audita(gh, todos):
-    corpo = {n: vs for n, vs in todos.items() if vs}
+def audita(gh, projeto):
+    if projeto.get('eco') == 'PyPI':
+        return audita_osv(gh, projeto['todos'], 'PyPI')
+    corpo = {n: vs for n, vs in projeto['todos'].items() if vs}
     if not corpo:
         return []
     st, dados = gh.requisita('https://registry.npmjs.org/-/npm/v1/security/advisories/bulk', metodo='POST', corpo=corpo, tempo=60)
@@ -1940,10 +2288,16 @@ def audita(gh, todos):
     return achados
 
 
-def ultima_versao(gh, nome, cache, trava):
+def ultima_versao(gh, eco, nome, cache, trava):
     with trava:
-        if nome in cache:
-            return cache[nome]
+        if (eco, nome) in cache:
+            return cache[(eco, nome)]
+    if eco == 'PyPI':
+        v = _pypi(nome)
+        info = {'versao': v, 'descontinuado': None} if v else None
+        with trava:
+            cache[(eco, nome)] = info
+        return info
     st, dados = gh.requisita(f'https://registry.npmjs.org/{nome.replace("/", "%2F")}/latest', tempo=30)
     info = None
     if st == 200:
@@ -1953,7 +2307,7 @@ def ultima_versao(gh, nome, cache, trava):
         except ValueError:
             pass
     with trava:
-        cache[nome] = info
+        cache[(eco, nome)] = info
     return info
 
 
@@ -1965,14 +2319,15 @@ def ferramenta_deps(ctx):
     projetos, falhas = em_paralelo(t, repos, lambda r: analisa_deps_repo(gh, r), 'lendo projetos', fios=6)
     lista = [(nome, p) for nome, ps in projetos.items() for p in ps]
     if not lista:
-        t.ok('Nenhum projeto JavaScript encontrado.')
+        t.ok('Nenhum projeto JavaScript ou Python encontrado.')
         return
-    auditorias, f2 = em_paralelo(t, lista, lambda np: audita(gh, np[1]['todos']), 'checando vulnerabilidades',
+    auditorias, f2 = em_paralelo(t, lista, lambda np: audita(gh, np[1]), 'checando vulnerabilidades',
                                  nome=lambda np: f'{np[0]}:{np[1]["pasta"]}', fios=4)
     falhas += f2
     cache, trava = {}, threading.Lock()
-    pacotes = sorted({n for _, p in lista for n in p['diretas']})
-    em_paralelo(t, pacotes, lambda n: ultima_versao(gh, n, cache, trava), 'conferindo versões', nome=lambda n: n, fios=10)
+    pacotes = sorted({(p['eco'], n) for _, p in lista for n in p['diretas']})
+    em_paralelo(t, pacotes, lambda en: ultima_versao(gh, en[0], en[1], cache, trava), 'conferindo versões',
+                nome=lambda en: en[1], fios=10)
     rel = Relatorio('deps')
     linhas_resumo = []
     for nome, p in lista:
@@ -1986,7 +2341,7 @@ def ferramenta_deps(ctx):
         velhas = []
         abandonadas = []
         for n, v in p['diretas'].items():
-            info = cache.get(n)
+            info = cache.get((p['eco'], n))
             if not info or not info['versao']:
                 continue
             d = defasagem(v, info['versao'])
@@ -2026,7 +2381,7 @@ def ferramenta_deps(ctx):
                 rel.add(f'    [{SEVERIDADE[v["sev"]][0]}] {v["pacote"]} {", ".join(v["versoes"])} — {v["titulo"]} — {v["url"]}')
         if majors:
             exemplos = ', '.join(f'{n} {a}→{u}' for _, n, a, u in sorted(majors)[:3])
-            t.escreve('      ' + t.p(corta(f'{len(velhas)} desatualizadas, {len(majors)} major: {exemplos}', t.largura - 8), 'apagado'))
+            t.escreve('      ' + t.p(corta(f'{pl(len(velhas), "desatualizada")}, {len(majors)} major: {exemplos}', t.largura - 8), 'apagado'))
             for d, n, a, u in sorted(velhas):
                 rel.add(f'    [{d}] {n} {a} → {u}')
         if abandonadas:
@@ -2043,8 +2398,15 @@ def ferramenta_deps(ctx):
     t.partes([t.p(sev_txt(s, total[s]), SEVERIDADE[s][1]) for s in SEVERIDADE if total[s]]
              or [t.p('nenhuma vulnerabilidade', 'verde')])
     t.partes([t.p(pl(len(lista), 'projeto'), 'apagado'), t.p(f'{limpos} sem pendências', 'apagado')])
-    t.paragrafo('Nada foi alterado. Para corrigir: npm audit fix (ou pnpm audit --fix); as majors, atualize uma de '
-                'cada vez e rode os testes.', 4, 'apagado')
+    ecos = {p['eco'] for _, p in lista}
+    dicas = (['npm audit fix (ou pnpm audit --fix)'] if 'npm' in ecos else []) + \
+            (['pip install -U pacote (ou poetry update pacote, uv lock --upgrade-package pacote)'] if 'PyPI' in ecos else [])
+    t.paragrafo('Nada foi alterado. Para corrigir: ' + '; '.join(dicas) + '. As majors, atualize uma de cada vez e rode '
+                'os testes.', 4, 'apagado')
+    sem_versao = [(nome, p) for nome, p in lista if p.get('sem_versao')]
+    if sem_versao:
+        t.paragrafo(f'{pl(len(sem_versao), "projeto Python")} sem lockfile nem versão fixa (==) em parte das '
+                    'dependências: essas não dá para auditar.', 4, 'apagado')
     t.relatorio(rel.salva())
 
 
@@ -2113,11 +2475,11 @@ def conta_marcas(pasta):
             + sum(1 for l in autores.splitlines() if PADRAO_AUTOR.search(l)))
 
 
-def dono_do_repo(pasta):
+def dono_do_repo(pasta, login):
     c = Counter(l for l in texto(roda(['git', '-C', pasta, 'log', '--all', '--format=%an|%ae']).stdout).splitlines()
                 if l and not re.search(r'anthropic\.com|^claude\||\[bot\]|noreply@github\.com', l, re.I))
     if not c:
-        return DONO, f'{DONO}@users.noreply.github.com'
+        return login, f'{login}@users.noreply.github.com'
     nome, _, email = c.most_common(1)[0][0].partition('|')
     return os.environ.get('AUTOR_NOME_FIXO', nome), os.environ.get('AUTOR_EMAIL_FIXO', email)
 
@@ -2133,7 +2495,7 @@ def limpa_coautoria(r, trabalho, backups, filtro, env):
         shutil.rmtree(pasta, ignore_errors=True)
         return 'limpo', 0, 0
     roda(['git', '-C', pasta, 'bundle', 'create', backups / f'{nome}.bundle', '--all'])
-    autor, email = dono_do_repo(pasta)
+    autor, email = dono_do_repo(pasta, r.get('owner', {}).get('login', ''))
     commits = texto(roda(['git', '-C', pasta, 'rev-list', '--all', '--count']).stdout).strip()
     f = roda(filtro + ['--force', '--quiet', '--message-callback', MSG_CB, '--commit-callback', COMMIT_CB],
              cwd=pasta, env=dict(env, AUTOR_NOME=autor, AUTOR_EMAIL=email), tempo=1800)
@@ -2149,7 +2511,7 @@ def limpa_coautoria(r, trabalho, backups, filtro, env):
 
 def ferramenta_coautores(ctx):
     t, gh = ctx.t, ctx.gh
-    repos = escolhe_repos(ctx, arquivados=False, precisa_login=not ctx.args.teste)
+    repos = escolhe_repos(ctx, arquivados=False, precisa_login={'repo', 'workflow'} if not ctx.args.teste else False)
     if not repos:
         return
     filtro = prepara_filter_repo(t)
@@ -2204,7 +2566,7 @@ def ferramenta_coautores(ctx):
     t.ok(f'{enviados} enviados.')
     t.nota('A lista "Contributors" da página do GitHub demora algumas horas para se atualizar.', 4)
     t.nota(f'para desfazer: git clone --mirror "{caminho_curto(backups)}/<repo>.bundle" x && cd x && '
-           f'git push --mirror --force https://github.com/{DONO}/<repo>.git', 4)
+           f'git push --mirror --force https://github.com/{gh.dono}/<repo>.git', 4)
 
 # ███████████████████████████████████████████████████████████████████████████
 #
@@ -4822,6 +5184,16 @@ def versao_tupla(v):
     return tuple(int(x) for x in re.findall(r'\d+', str(v or ''))[:4])
 
 
+# pré-lançamento pelo nome: alpha, beta, rc, nightly… e o jeito do PEP 440 (1.0a1, 2.0b3, 3.1rc1, 1.2.dev0).
+# "2.80.0-6ubuntu3" e "2.43.0.windows.1" não entram: o traço e o texto ali são revisão, não pré-lançamento
+RE_INSTAVEL = re.compile(r'(?i)(alpha|beta|\brc|[._-]rc|\bpre\b|[._-]pre|preview|nightly|canary|insider|snapshot|'
+                         r'experimental|unstable|\bnext\b|[._-]dev|\d(a|b|rc|c)\d+\b)')
+
+
+def eh_estavel(v):
+    return bool(v) and not RE_INSTAVEL.search(str(v))
+
+
 def subiu_major(atual, novo):
     a, n = versao_tupla(atual), versao_tupla(novo)
     return bool(a and n and n[0] > a[0])
@@ -4875,8 +5247,14 @@ def _json_web(url):
 
 
 def _pypi(nome):
-    dados = _json_web(f'https://pypi.org/pypi/{quote(nome)}/json')
-    return (dados or {}).get('info', {}).get('version')
+    """Última versão ESTÁVEL no PyPI: tira pré-lançamento e versão retirada (yanked)."""
+    dados = _json_web(f'https://pypi.org/pypi/{quote(nome)}/json') or {}
+    estaveis = [v for v, arqs in (dados.get('releases') or {}).items()
+                if eh_estavel(v) and arqs and not all(a.get('yanked') for a in arqs)]
+    if estaveis:
+        return max(estaveis, key=versao_tupla)
+    v = (dados.get('info') or {}).get('version')
+    return v if eh_estavel(v) else None
 
 
 def _pypi_varios(pares):
@@ -5130,7 +5508,18 @@ def _ultima_marketplace(ids):
 
 def _ultima_openvsx(ident):
     ns, _, nome = ident.partition('.')
-    return (_json_web(f'https://open-vsx.org/api/{quote(ns)}/{quote(nome)}') or {}).get('version')
+    base = f'https://open-vsx.org/api/{quote(ns)}/{quote(nome)}'
+    dados = _json_web(base) or {}
+    if not dados.get('preRelease') and eh_estavel(dados.get('version')):
+        return dados.get('version')
+    # a última é pré-lançamento: desce pelas versões até achar uma estável (no máximo 6 consultas)
+    for v in sorted((dados.get('allVersions') or {}), key=versao_tupla, reverse=True)[:6]:
+        if v == 'latest' or not eh_estavel(v):
+            continue
+        info = _json_web(f'{base}/{quote(v)}') or {}
+        if not info.get('preRelease'):
+            return v
+    return None
 
 
 def checa_editor(editor, loja):
@@ -5243,7 +5632,27 @@ def _verifica(fonte):
     nota = ''
     if isinstance(res, tuple):
         res, nota = res
+    if res:
+        # só versão estável; quem já está num beta continua recebendo os betas daquele pacote
+        res = [(n, a, v) for n, a, v in res if eh_estavel(v) or (a and not eh_estavel(a))]
     return {'itens': res, 'nota': nota, 'erro': None}
+
+
+def dica_de_falha(ultima, fonte):
+    """Traduz as falhas mais comuns em o que fazer."""
+    txt = (ultima or '').lower()
+    if 'eacces' in txt or ('permission denied' in txt and fonte['id'] in ('npm', 'pnpm')):
+        return ('o npm global está numa pasta do sistema: use um gerenciador de versões do Node (fnm, nvm, volta) '
+                'ou rode com sudo')
+    if 'externally-managed' in txt:
+        return 'esse Python é do sistema: instale ferramentas com pipx ou uv, e pacotes de projeto num venv'
+    if 'access is denied' in txt or 'requires elevation' in txt or 'administrator' in txt or 'acesso negado' in txt:
+        return 'precisa do terminal aberto como administrador'
+    if 'could not resolve' in txt or 'network' in txt or 'timed out' in txt or 'temporary failure' in txt:
+        return 'falha de rede: confira a internet e rode de novo'
+    if 'lock' in txt and ('dpkg' in txt or 'apt' in txt or 'held by' in txt):
+        return 'outro programa está instalando pacotes agora (atualização automática?); espere terminar e rode de novo'
+    return ''
 
 
 def executa_vivo(cmd, log, pr, env=None):
@@ -5416,6 +5825,9 @@ def ferramenta_atualizar(t, args):
             t.item('✗', 'vermelho', f['nome'], t.p(f'saiu com código {cod}', 'vermelho'), recuo=4)
             if ultima:
                 t.nota(corta(ultima, t.largura - 9), 8)
+            dica = dica_de_falha(ultima, f)
+            if dica:
+                t.paragrafo(dica, 8, 'amarelo')
     t.escreve()
     t.relatorio(arq_log, 'log')
     if Path('/var/run/reboot-required').exists():
@@ -5527,6 +5939,9 @@ def monta_parser():
     bk.add_argument('--destino', help='pasta do backup (padrão ~/backup-github; ele lembra da última)')
     sub.add_parser('deps', parents=[depois, de_repos], help='[GitHub] vulnerabilidades e dependências velhas')
     sub.add_parser('coautores', parents=[depois, de_repos], help='[GitHub] tira a coautoria do Claude do histórico')
+    lg = sub.add_parser('login', parents=[depois], help='[GitHub] mostra, troca ou apaga o login guardado')
+    lg.add_argument('--trocar', action='store_true', help='cola um token novo no lugar do atual')
+    lg.add_argument('--sair', action='store_true', help='apaga o token guardado pela ferramenta')
 
     f = sub.add_parser('faxina', parents=[depois], help='[PC] libera espaço de projetos parados')
     f.add_argument('pastas', nargs='*', help='onde procurar (padrão: sua pasta pessoal)')
@@ -5538,7 +5953,7 @@ def monta_parser():
                     help='próxima porta livre a partir de DESDE (padrão 3000)')
     po.add_argument('--todas', action='store_true', help='inclui as portas altas do sistema')
     rx = sub.add_parser('raiox', parents=[depois], help='[site] acessibilidade, SEO, desempenho e segurança')
-    rx.add_argument('url', help='endereço do site (ex.: kessleru.com.br ou localhost:5173)')
+    rx.add_argument('url', help='endereço do site (ex.: meusite.com.br ou localhost:5173)')
     rx.add_argument('--desktop', action='store_true', help='Lighthouse como computador (padrão: celular)')
     rx.add_argument('--rapido', action='store_true', help='sem o Lighthouse (só a análise própria, em segundos)')
     rx.add_argument('--paginas', type=int, default=0, metavar='N', help='analisa também N páginas internas')
@@ -5611,7 +6026,7 @@ def menu(ctx, parser, args):
                     extra.append('--teste')
             t.escreve()
         elif cmd in ('raiox', 'peso'):
-            t.paragrafo('endereço do site (ex.: kessleru.com.br ou localhost:5173); Enter = voltar', 2, 'apagado')
+            t.paragrafo('endereço do site (ex.: meusite.com.br ou localhost:5173); Enter = voltar', 2, 'apagado')
             endereco = t.pergunta('endereço').strip()
             if not endereco:
                 continue
@@ -5641,6 +6056,11 @@ def main():
     t = Terminal(args.ascii, args.sem_cor)
     ctx = Ctx(args, t)
     try:
+        if args.comando == 'login':
+            t.cabecalho('login')
+            cod = ferramenta_login(ctx)
+            t.fim('pronto' if not cod else 'sem login', 'ok' if not cod else 'aviso')
+            return cod
         if args.comando:
             t.cabecalho(args.comando)
             return roda_ferramenta(ctx, args)
