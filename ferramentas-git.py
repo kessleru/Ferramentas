@@ -299,7 +299,7 @@ class Terminal:
 
     def prompt(self, pasta, txt):
         self.escreve('  ' + self.p('~', 'verde') + self.p(f'/{pasta}/', 'sub') + ' '
-                     + self.p('>', 'verde') + ' ' + self.p(corta(txt, self.largura - len(pasta) - 7), 'texto'))
+                     + self.p('>', 'verde') + ' ' + self.p(corta(txt, self.largura - len(pasta) - 8), 'texto'))
 
     def item(self, icone, cor, nome, detalhe='', recuo=2, cor_nome='texto'):
         w = self.largura
